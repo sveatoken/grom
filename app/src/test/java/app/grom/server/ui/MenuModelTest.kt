@@ -28,6 +28,7 @@ class MenuModelTest {
                 MenuModel.KEY_SSH,
                 MenuModel.KEY_FLEET,
                 MenuModel.KEY_NOSTR,
+                MenuModel.KEY_AI,
                 MenuModel.KEY_PROJECTS,
                 MenuModel.KEY_ALERTS,
                 MenuModel.KEY_ACCESS,

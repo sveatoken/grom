@@ -51,6 +51,7 @@ import app.grom.server.superserver.auth.PasswordHash
 import app.grom.server.superserver.nostr.Nip19
 import app.grom.server.superserver.nostr.RelayUrl
 import app.grom.server.superserver.nostr.RemoteBridgeHint
+import app.grom.server.superserver.plugins.ai.AiProviderKind
 import app.grom.server.superserver.plugins.lightning.ExternalNodeKind
 import app.grom.server.superserver.plugins.lightning.ExternalNodeRef
 import app.grom.server.ui.DashboardModel
@@ -121,6 +122,17 @@ class GromActivity : Activity() {
      * a live view and a section can never show stale or uninitialised content.
      */
     private val sectionPanels = LinkedHashMap<String, LinearLayout>()
+
+    // AI gateway (D94). The section reads one Binder document and re-renders
+    // only when its signature changes; every action replaces the document.
+    private var aiStatusDoc: Map<String, Any?>? = null
+    private var aiLoaded = false
+    private var lastAiSignature: String? = null
+    private lateinit var aiProviderList: LinearLayout
+    private lateinit var aiModelList: LinearLayout
+    private lateinit var aiToggleRow: Pair<LinearLayout, TextView>
+    private lateinit var aiDefaultLine: TextView
+    private lateinit var aiDetail: TextView
 
     private lateinit var runtimeTitle: TextView
     private lateinit var runtimeDetail: TextView
@@ -449,6 +461,7 @@ class GromActivity : Activity() {
         panel(MenuModel.KEY_SSH) { buildSshSection(it) }
         panel(MenuModel.KEY_FLEET) { buildFleetSection(it) }
         panel(MenuModel.KEY_NOSTR) { buildNostrSection(it) }
+        panel(MenuModel.KEY_AI) { buildAiSection(it) }
         panel(MenuModel.KEY_PROJECTS) { buildProjectsSection(it) }
         panel(MenuModel.KEY_ALERTS) { buildAlertsSection(it) }
         panel(MenuModel.KEY_ACCESS) { buildAccessSection(it) }
@@ -605,6 +618,8 @@ class GromActivity : Activity() {
         if (key == MenuModel.KEY_FLEET && !fleetLoaded) refreshFleet()
         // A measurement, on demand, when the operator opens the screen (D74, D80).
         if (key == MenuModel.KEY_DOCTOR) refreshDoctor()
+        // The gateway document is read when the section opens, never in a loop.
+        if (key == MenuModel.KEY_AI && !aiLoaded) loadAi()
     }
 
     // ---------------------------------------------------------- section bodies
@@ -800,6 +815,664 @@ class GromActivity : Activity() {
             LinearLayout.LayoutParams.MATCH_PARENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
         )
+    }
+
+    // -------------------------------------------------------- AI gateway (D94)
+
+    /**
+     * Providers and models, as one card (D94).
+     *
+     * The screen never holds a key in a field it later reads back: the key is
+     * typed once, sent, sealed by the engine and replaced by "key stored". A
+     * refusal from the engine (a bad URL, a duplicate id) is shown with its own
+     * code instead of "it failed".
+     */
+    private fun buildAiSection(body: LinearLayout) {
+        if (!BuildConfig.GROMSERVER) {
+            body.addView(text(getString(R.string.ai_unavailable), 12f, palette.muted))
+            return
+        }
+        body.addView(text(getString(R.string.ai_hint), 12f, palette.muted))
+        body.addView(gap(10))
+
+        aiToggleRow = actionRowState(getString(R.string.ai_toggle), palette) { toggleAiEnabled() }
+        body.addView(aiToggleRow.first)
+        body.addView(divider(palette))
+
+        body.addView(label(getString(R.string.ai_section_providers), palette))
+        aiProviderList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        body.addView(aiProviderList)
+        body.addView(gap(8))
+        body.addView(
+            docButton(R.string.ai_add_provider) { showAddProviderDialog() }
+        )
+
+        body.addView(divider(palette))
+        body.addView(label(getString(R.string.ai_section_models), palette))
+        aiModelList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        body.addView(aiModelList)
+        body.addView(gap(8))
+        body.addView(
+            docButton(R.string.ai_add_model) { showAddModelDialog() }
+        )
+
+        body.addView(divider(palette))
+        aiDefaultLine = text("", 12f, palette.muted)
+        body.addView(aiDefaultLine)
+        aiDetail = text("", 11f, palette.muted)
+        body.addView(gap(4))
+        body.addView(aiDetail)
+    }
+
+    /** Reads the gateway document from the engine, off the main thread. */
+    private fun loadAi() {
+        if (!BuildConfig.GROMSERVER) return
+        Thread {
+            val document = runCatching { aiCall { it.aiStatusJson() } }.getOrNull()
+            handler.post {
+                if (document != null) {
+                    aiLoaded = true
+                    aiStatusDoc = document
+                    renderAi()
+                } else if (::aiDetail.isInitialized) {
+                    aiDetail.text = getString(R.string.state_offline)
+                }
+            }
+        }.start()
+    }
+
+    /**
+     * Runs one mutating call and adopts the status document it returns. The
+     * engine's own code is what reaches the operator: `AI_UNKNOWN_MODEL` and
+     * `BAD_PROVIDER_URL` are actionable, "failed" is not.
+     */
+    private fun applyAi(block: (IGromServer) -> String, successRes: Int) {
+        if (!connected) {
+            toast(getString(R.string.toast_not_bound, getString(R.string.ui_ai)))
+            return
+        }
+        Thread {
+            val result = runCatching { aiCall { block(it) } }
+            handler.post {
+                result.fold(
+                    onSuccess = { document ->
+                        aiStatusDoc = document
+                        aiLoaded = true
+                        lastAiSignature = null
+                        toast(getString(successRes))
+                        renderAi()
+                    },
+                    onFailure = { failure ->
+                        toast(failure.message ?: getString(R.string.ai_saved))
+                        loadAi()
+                    }
+                )
+            }
+        }.start()
+    }
+
+    /** The measured test is the only way a provider lamp turns green (D96). */
+    private fun probeAiProvider(id: String) {
+        if (!connected) {
+            toast(getString(R.string.toast_not_bound, getString(R.string.ui_ai)))
+            return
+        }
+        toast(getString(R.string.ai_test_running))
+        Thread {
+            val result = runCatching {
+                val server = client.server
+                    ?: throw IllegalStateException(getString(R.string.state_offline))
+                JsonParser.parseObjectOrNull(server.aiProbeProviderJson(id))
+                    ?: throw IllegalStateException("the engine returned no document")
+            }
+            handler.post {
+                val probe = result.getOrNull()
+                if (probe == null) {
+                    toast(result.exceptionOrNull()?.message ?: getString(R.string.ai_saved))
+                } else if (probe["ok"] == true) {
+                    toast(
+                        getString(
+                            R.string.ai_test_ok,
+                            (probe["latencyMs"] as? Number)?.toLong() ?: 0L
+                        )
+                    )
+                } else {
+                    val reason = (probe["detail"] as? String)
+                        ?: (probe["code"] as? String)
+                        ?: getString(R.string.ai_saved)
+                    toast(getString(R.string.ai_test_failed, reason))
+                }
+                loadAi()
+            }
+        }.start()
+    }
+
+    private fun aiCall(block: (IGromServer) -> String): Map<String, Any?> {
+        val server = client.server
+            ?: throw IllegalStateException(getString(R.string.state_offline))
+        return JsonParser.parseObjectOrNull(block(server))
+            ?: throw IllegalStateException("the engine returned no document")
+    }
+
+    private fun renderAi() {
+        if (!BuildConfig.GROMSERVER || !::aiProviderList.isInitialized) return
+        val doc = aiStatusDoc ?: return
+        val providers = (doc["providers"] as? List<*>).orEmpty().mapNotNull { it as? Map<*, *> }
+        val models = (doc["models"] as? List<*>).orEmpty().mapNotNull { it as? Map<*, *> }
+
+        val signature = buildString {
+            append(doc["enabled"])
+            append('|').append(doc["defaultModel"])
+            append('|').append(doc["error"])
+            for (provider in providers) {
+                append('|').append(provider["id"]).append(':').append(provider["enabled"])
+                append(':').append(provider["keySet"])
+                append(':').append((provider["probe"] as? Map<*, *>)?.get("ok"))
+            }
+            for (model in models) {
+                append('|').append(model["id"]).append(':').append(model["enabled"])
+            }
+        }
+        if (signature == lastAiSignature) return
+        lastAiSignature = signature
+
+        aiToggleRow.second.text = if (doc["enabled"] == true) {
+            getString(R.string.ai_state_on)
+        } else {
+            getString(R.string.ai_state_off)
+        }
+
+        aiProviderList.removeAllViews()
+        if (providers.isEmpty()) {
+            aiProviderList.addView(text(getString(R.string.ai_none_providers), 12f, palette.muted))
+        } else {
+            for (provider in providers) aiProviderList.addView(aiProviderRow(provider))
+        }
+
+        aiModelList.removeAllViews()
+        if (models.isEmpty()) {
+            aiModelList.addView(text(getString(R.string.ai_none_models), 12f, palette.muted))
+        } else {
+            for (model in models) aiModelList.addView(aiModelRow(model))
+        }
+
+        val default = doc["defaultModel"] as? String
+        aiDefaultLine.text = if (default.isNullOrEmpty()) {
+            getString(R.string.ai_no_default)
+        } else {
+            getString(R.string.ai_default_model, default)
+        }
+        val error = doc["error"] as? String
+        aiDetail.text = when {
+            error != null -> getString(R.string.ai_error_line, error)
+            doc["enabled"] != true -> getString(R.string.ai_off_note)
+            else -> ""
+        }
+    }
+
+    private fun aiProviderRow(provider: Map<*, *>): View {
+        val id = provider["id"] as? String ?: ""
+        val keySet = provider["keySet"] == true
+        val enabled = provider["enabled"] == true
+        val probe = provider["probe"] as? Map<*, *>
+        val lamp = when {
+            !enabled -> Lamp.UNKNOWN
+            !keySet -> Lamp.OFF
+            probe == null -> Lamp.UNKNOWN
+            probe["ok"] == true -> Lamp.ON
+            else -> Lamp.OFF
+        }
+        val modelCount = (provider["modelCount"] as? Number)?.toInt() ?: 0
+        val modelText = if (modelCount == 0) {
+            getString(R.string.ai_no_models)
+        } else {
+            resources.getQuantityString(R.plurals.ai_model_count, modelCount, modelCount)
+        }
+        val detail = getString(
+            R.string.ai_provider_detail,
+            provider["protocol"]?.toString() ?: "",
+            if (keySet) getString(R.string.ai_key_set) else getString(R.string.ai_key_missing),
+            modelText
+        )
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(10), 0, dp(10))
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { showProviderDialog(id) }
+            addView(lampView(lamp, palette))
+            addView(
+                LinearLayout(this@GromActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(text(provider["title"]?.toString() ?: id, 14f, palette.onSurface))
+                    addView(gap(2))
+                    addView(text(detail, 11f, palette.muted))
+                },
+                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            )
+            addView(text("\u203A", 20f, palette.muted))
+        }
+    }
+
+    private fun aiModelRow(model: Map<*, *>): View {
+        val id = model["id"] as? String ?: ""
+        val enabled = model["enabled"] == true
+        val available = model["available"] == true
+        val lamp = when {
+            !enabled -> Lamp.UNKNOWN
+            available -> Lamp.ON
+            else -> Lamp.OFF
+        }
+        val detail = getString(
+            R.string.ai_model_detail,
+            model["providerTitle"]?.toString() ?: "",
+            if (available) getString(R.string.ai_state_on) else getString(R.string.ai_not_available)
+        )
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(10), 0, dp(10))
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { showModelDialog(id) }
+            addView(lampView(lamp, palette))
+            addView(
+                LinearLayout(this@GromActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(text(id, 14f, palette.onSurface))
+                    addView(gap(2))
+                    addView(text(detail, 11f, palette.muted))
+                },
+                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            )
+            addView(text("\u203A", 20f, palette.muted))
+        }
+    }
+
+    private fun toggleAiEnabled() {
+        val next = aiStatusDoc?.get("enabled") != true
+        applyAi({ it.aiConfigureJson(Json.encode(mapOf("enabled" to next))) }, R.string.ai_saved)
+    }
+
+    private fun showAddProviderDialog() {
+        var kind = AiProviderKind.OPENAI
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(4), dp(20), 0)
+        }
+        val idInput = EditText(this).apply {
+            hint = getString(R.string.ai_field_id)
+            setSingleLine()
+        }
+        val titleInput = EditText(this).apply {
+            hint = getString(R.string.ai_field_title)
+            setSingleLine()
+        }
+        val baseInput = EditText(this).apply {
+            hint = kind.defaultBaseUrl.ifEmpty { getString(R.string.ai_field_base_url) }
+            setSingleLine()
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+        }
+        val kindRow = text(getString(R.string.ai_field_kind, kind.wireName), 13f, palette.onSurface)
+            .apply {
+                setPadding(0, dp(12), 0, dp(12))
+                isClickable = true
+                setOnClickListener {
+                    val kinds = AiProviderKind.entries.map { it.wireName }
+                    AlertDialog.Builder(this@GromActivity)
+                        .setTitle(R.string.ai_kind_pick)
+                        .setItems(kinds.toTypedArray()) { _, which ->
+                            kind = AiProviderKind.entries[which]
+                            text = getString(R.string.ai_field_kind, kind.wireName)
+                            // The placeholder follows the kind, so an operator
+                            // who never types a URL still sees where it goes.
+                            baseInput.hint = kind.defaultBaseUrl.ifEmpty {
+                                getString(R.string.ai_field_base_url)
+                            }
+                        }
+                        .show()
+                }
+            }
+        val keyInput = EditText(this).apply {
+            hint = getString(R.string.ai_field_api_key)
+            setSingleLine()
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+        val enabledBox = CheckBox(this).apply {
+            setText(R.string.ai_field_enabled)
+            isChecked = true
+        }
+        column.addView(idInput)
+        column.addView(titleInput)
+        column.addView(kindRow)
+        column.addView(baseInput)
+        column.addView(keyInput)
+        column.addView(enabledBox)
+        column.addView(
+            text(getString(R.string.ai_dialog_provider_body), 11f, palette.muted)
+        )
+
+        AlertDialog.Builder(this)
+            .setTitle(R.string.ai_dialog_add_provider)
+            .setView(column)
+            .setPositiveButton(R.string.ai_action_save) { _, _ ->
+                val id = idInput.text.toString().trim()
+                if (id.isEmpty()) {
+                    toast(getString(R.string.ai_id_required))
+                    return@setPositiveButton
+                }
+                applyAi({
+                    it.aiSaveProviderJson(
+                        Json.encode(
+                            mapOf(
+                                "id" to id,
+                                "kind" to kind.wireName,
+                                "title" to titleInput.text.toString().trim(),
+                                "baseUrl" to baseInput.text.toString().trim(),
+                                "apiKey" to keyInput.text.toString().trim()
+                                    .takeIf { value -> value.isNotEmpty() },
+                                "enabled" to enabledBox.isChecked
+                            )
+                        )
+                    )
+                }, R.string.ai_saved)
+            }
+            .setNegativeButton(R.string.dialog_cancel, null)
+            .show()
+    }
+
+    private fun showProviderDialog(id: String) {
+        val provider = (aiStatusDoc?.get("providers") as? List<*>)
+            .orEmpty()
+            .mapNotNull { it as? Map<*, *> }
+            .firstOrNull { it["id"] == id } ?: return
+
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(4), dp(20), 0)
+        }
+        val kind = AiProviderKind.fromWire(provider["kind"] as? String)
+        val baseInput = EditText(this).apply {
+            setText(provider["baseUrl"] as? String ?: "")
+            setSingleLine()
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            hint = kind?.defaultBaseUrl ?: getString(R.string.ai_field_base_url)
+        }
+        val keyInput = EditText(this).apply {
+            hint = getString(R.string.ai_field_api_key_keep)
+            setSingleLine()
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+        val clearBox = CheckBox(this).apply {
+            setText(R.string.ai_action_clear_key)
+            // An explicit action, never a default: a checked box here used to
+            // discard a key that had just been pasted.
+            isChecked = false
+        }
+        val titleInput = EditText(this).apply {
+            setText(provider["title"] as? String ?: id)
+            setSingleLine()
+        }
+        val enabledBox = CheckBox(this).apply {
+            setText(R.string.ai_field_enabled)
+            isChecked = provider["enabled"] == true
+        }
+        column.addView(titleInput)
+        column.addView(baseInput)
+        column.addView(keyInput)
+        column.addView(clearBox)
+        column.addView(enabledBox)
+        column.addView(
+            text(
+                getString(R.string.ai_key_note, if (provider["keySet"] == true) {
+                    getString(R.string.ai_key_set)
+                } else {
+                    getString(R.string.ai_key_missing)
+                }),
+                11f,
+                palette.muted
+            )
+        )
+
+        val canTest = provider["keySet"] == true
+
+        AlertDialog.Builder(this)
+            .setTitle(provider["title"]?.toString() ?: id)
+            .setView(column)
+            .setPositiveButton(R.string.ai_action_save) { _, _ ->
+                applyAi({
+                    it.aiSaveProviderJson(
+                        Json.encode(
+                            mapOf(
+                                "id" to id,
+                                "title" to titleInput.text.toString().trim(),
+                                "baseUrl" to baseInput.text.toString().trim(),
+                                "apiKey" to keyInput.text.toString().trim()
+                                    .takeIf { value -> value.isNotEmpty() },
+                                "clearKey" to clearBox.isChecked,
+                                "enabled" to enabledBox.isChecked
+                            )
+                        )
+                    )
+                }, R.string.ai_saved)
+            }
+            .setNeutralButton(R.string.ai_action_test, null)
+            .setNegativeButton(R.string.ai_action_remove, null)
+            .create()
+            .apply {
+                setOnShowListener {
+                    getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                        if (!canTest) {
+                            toast(getString(R.string.ai_test_failed, getString(R.string.ai_key_missing)))
+                            return@setOnClickListener
+                        }
+                        dismiss()
+                        probeAiProvider(id)
+                    }
+                    getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener {
+                        dismiss()
+                        confirmRemoveProvider(id, provider["title"]?.toString() ?: id)
+                    }
+                }
+                show()
+            }
+    }
+
+    private fun showAddModelDialog() {
+        val providers = (aiStatusDoc?.get("providers") as? List<*>)
+            .orEmpty()
+            .mapNotNull { it as? Map<*, *> }
+        if (providers.isEmpty()) {
+            toast(getString(R.string.ai_provider_required))
+            return
+        }
+        var providerId = providers.first()["id"] as? String ?: ""
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(4), dp(20), 0)
+        }
+        val idInput = EditText(this).apply {
+            hint = getString(R.string.ai_field_id)
+            setSingleLine()
+        }
+        val providerRow = text(getString(R.string.ai_field_provider, providerId), 13f, palette.onSurface)
+            .apply {
+                setPadding(0, dp(12), 0, dp(12))
+                isClickable = true
+                setOnClickListener {
+                    val ids = providers.mapNotNull { it["id"] as? String }
+                    AlertDialog.Builder(this@GromActivity)
+                        .setTitle(R.string.ai_provider_pick)
+                        .setItems(ids.toTypedArray()) { _, which ->
+                            providerId = ids[which]
+                            text = getString(R.string.ai_field_provider, providerId)
+                        }
+                        .show()
+                }
+            }
+        val upstreamInput = EditText(this).apply {
+            hint = getString(R.string.ai_field_upstream)
+            setSingleLine()
+        }
+        val titleInput = EditText(this).apply {
+            hint = getString(R.string.ai_field_title)
+            setSingleLine()
+        }
+        val enabledBox = CheckBox(this).apply {
+            setText(R.string.ai_field_enabled)
+            isChecked = true
+        }
+        column.addView(idInput)
+        column.addView(providerRow)
+        column.addView(upstreamInput)
+        column.addView(titleInput)
+        column.addView(enabledBox)
+
+        AlertDialog.Builder(this)
+            .setTitle(R.string.ai_dialog_add_model)
+            .setView(column)
+            .setPositiveButton(R.string.ai_action_save) { _, _ ->
+                val id = idInput.text.toString().trim()
+                if (id.isEmpty()) {
+                    toast(getString(R.string.ai_id_required))
+                    return@setPositiveButton
+                }
+                applyAi({
+                    it.aiSaveModelJson(
+                        Json.encode(
+                            mapOf(
+                                "id" to id,
+                                "provider" to providerId,
+                                "upstream" to upstreamInput.text.toString().trim()
+                                    .takeIf { value -> value.isNotEmpty() },
+                                "title" to titleInput.text.toString().trim(),
+                                "enabled" to enabledBox.isChecked
+                            )
+                        )
+                    )
+                }, R.string.ai_saved)
+            }
+            .setNegativeButton(R.string.dialog_cancel, null)
+            .show()
+    }
+
+    private fun showModelDialog(id: String) {
+        val model = (aiStatusDoc?.get("models") as? List<*>)
+            .orEmpty()
+            .mapNotNull { it as? Map<*, *> }
+            .firstOrNull { it["id"] == id } ?: return
+
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(4), dp(20), 0)
+        }
+        val upstreamInput = EditText(this).apply {
+            setText(model["upstream"] as? String ?: id)
+            setSingleLine()
+            hint = getString(R.string.ai_field_upstream)
+        }
+        val titleInput = EditText(this).apply {
+            setText(model["title"] as? String ?: id)
+            setSingleLine()
+        }
+        val enabledBox = CheckBox(this).apply {
+            setText(R.string.ai_field_enabled)
+            isChecked = model["enabled"] == true
+        }
+        val tokensInput = EditText(this).apply {
+            hint = getString(R.string.ai_field_max_tokens)
+            setSingleLine()
+            inputType = InputType.TYPE_CLASS_NUMBER
+            (model["maxOutputTokens"] as? Number)?.let { setText(it.toString()) }
+        }
+        column.addView(upstreamInput)
+        column.addView(titleInput)
+        column.addView(tokensInput)
+        column.addView(enabledBox)
+
+        AlertDialog.Builder(this)
+            .setTitle(id)
+            .setView(column)
+            .setPositiveButton(R.string.ai_action_save) { _, _ ->
+                val tokens = tokensInput.text.toString().trim().toIntOrNull()
+                applyAi({
+                    it.aiSaveModelJson(
+                        Json.encode(
+                            mapOf(
+                                "id" to id,
+                                "provider" to (model["provider"] as? String),
+                                "upstream" to upstreamInput.text.toString().trim()
+                                    .takeIf { value -> value.isNotEmpty() },
+                                "title" to titleInput.text.toString().trim(),
+                                "enabled" to enabledBox.isChecked,
+                                "maxOutputTokens" to tokens
+                            )
+                        )
+                    )
+                }, R.string.ai_saved)
+            }
+            .setNeutralButton(R.string.ai_action_set_default, null)
+            .setNegativeButton(R.string.ai_action_remove, null)
+            .create()
+            .apply {
+                setOnShowListener {
+                    getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                        dismiss()
+                        applyAiRefreshing(R.string.ai_default_saved) {
+                            it.aiConfigureJson(Json.encode(mapOf("defaultModel" to id)))
+                        }
+                    }
+                    getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener {
+                        dismiss()
+                        confirmRemoveModel(id)
+                    }
+                }
+                show()
+            }
+    }
+
+    /**
+     * A mutation whose success message is set by the caller (the default
+     * picker). It reports success only after the engine accepted the change —
+     * the answer decides what is shown, not the tap.
+     */
+    private fun applyAiRefreshing(successRes: Int, block: (IGromServer) -> String) {
+        Thread {
+            val result = runCatching { aiCall { block(it) } }
+            handler.post {
+                result.onSuccess {
+                    aiStatusDoc = it
+                    lastAiSignature = null
+                    renderAi()
+                    toast(getString(successRes))
+                }.onFailure { failure ->
+                    toast(failure.message ?: getString(R.string.ai_saved))
+                }
+            }
+        }.start()
+    }
+
+    private fun confirmRemoveProvider(id: String, title: String) {
+        AlertDialog.Builder(this)
+            .setTitle(R.string.ai_remove_provider_title)
+            .setMessage(getString(R.string.ai_remove_provider_body, title))
+            .setPositiveButton(R.string.ai_action_remove) { _, _ ->
+                applyAi({ it.aiRemoveProvider(id) }, R.string.ai_removed)
+            }
+            .setNegativeButton(R.string.dialog_cancel, null)
+            .show()
+    }
+
+    private fun confirmRemoveModel(id: String) {
+        AlertDialog.Builder(this)
+            .setTitle(R.string.ai_action_remove)
+            .setMessage(getString(R.string.ai_remove_model_body, id))
+            .setPositiveButton(R.string.ai_action_remove) { _, _ ->
+                applyAi({ it.aiRemoveModel(id) }, R.string.ai_removed)
+            }
+            .setNegativeButton(R.string.dialog_cancel, null)
+            .show()
     }
 
     private fun buildSshSection(body: LinearLayout) {
@@ -2302,12 +2975,25 @@ class GromActivity : Activity() {
             setText(R.string.fleet_grant_scope_services_call)
             isChecked = false
         }
+        // The AI gateway is a separate grant (D94): reading the catalogue and
+        // spending the operator's credit are two decisions, so they are two
+        // checkboxes and never implied by "call services".
+        val aiReadBox = CheckBox(this).apply {
+            setText(R.string.fleet_grant_scope_ai_read)
+            isChecked = false
+        }
+        val aiChatBox = CheckBox(this).apply {
+            setText(R.string.fleet_grant_scope_ai_chat)
+            isChecked = false
+        }
         column.addView(keyInput)
         column.addView(labelInput)
         column.addView(statusBox)
         column.addView(configBox)
         column.addView(servicesReadBox)
         column.addView(servicesCallBox)
+        column.addView(aiReadBox)
+        column.addView(aiChatBox)
         AlertDialog.Builder(this)
             .setTitle(R.string.fleet_grant_title)
             .setMessage(R.string.fleet_grant_body)
@@ -2323,6 +3009,8 @@ class GromActivity : Activity() {
                     if (configBox.isChecked) add("config.read")
                     if (servicesReadBox.isChecked) add("services.read")
                     if (servicesCallBox.isChecked) add("services.call")
+                    if (aiReadBox.isChecked) add("ai.read")
+                    if (aiChatBox.isChecked) add("ai.chat")
                 }
                 if (scopes.isEmpty()) {
                     toast(getString(R.string.fleet_grant_scope_required))
@@ -3268,6 +3956,7 @@ class GromActivity : Activity() {
             renderAlerts()
             renderFleet()
             renderDoctor()
+            renderAi()
         }
         val dashboard = DashboardModel.build(status)
         renderServing(dashboard)

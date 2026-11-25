@@ -39,6 +39,7 @@ object MenuModel {
     const val KEY_SSH: String = "ssh"
     const val KEY_FLEET: String = "fleet"
     const val KEY_NOSTR: String = "nostr"
+    const val KEY_AI: String = "ai"
     const val KEY_PROJECTS: String = "projects"
     const val KEY_ALERTS: String = "alerts"
     const val KEY_ACCESS: String = "access"
@@ -50,10 +51,11 @@ object MenuModel {
 
     /**
      * Ordered by what breaks first if it is ignored: the link to the outside,
-     * the chain settings other software reads, the apps being served, the
-     * alerts, the public surface, supervision, the Doctor that explains a phone
-     * which keeps stopping the server, updates, and finally the two informational
-     * entries (invite, then the explanation).
+     * the chain settings other software reads, the AI gateway other apps spend
+     * through, the apps being served, the alerts, the public surface,
+     * supervision, the Doctor that explains a phone which keeps stopping the
+     * server, updates, and finally the two informational entries (invite, then
+     * the explanation).
      */
     fun entries(serverRole: Boolean): List<MenuEntry> {
         if (!serverRole) {
@@ -67,6 +69,7 @@ object MenuModel {
             MenuEntry(KEY_SSH, R.string.ui_external, R.string.menu_ssh_sub),
             MenuEntry(KEY_FLEET, R.string.ui_fleet, R.string.menu_fleet_sub),
             MenuEntry(KEY_NOSTR, R.string.ui_nostr_lightning, R.string.menu_nostr_sub),
+            MenuEntry(KEY_AI, R.string.ui_ai, R.string.menu_ai_sub),
             MenuEntry(KEY_PROJECTS, R.string.ui_projects, R.string.menu_projects_sub),
             MenuEntry(KEY_ALERTS, R.string.ui_alerts, R.string.menu_alerts_sub),
             MenuEntry(KEY_ACCESS, R.string.ui_public_access, R.string.menu_access_sub),
@@ -86,6 +89,7 @@ object MenuModel {
         KEY_SSH -> R.string.ui_external
         KEY_FLEET -> R.string.ui_fleet
         KEY_NOSTR -> R.string.ui_nostr_lightning
+        KEY_AI -> R.string.ui_ai
         KEY_PROJECTS -> R.string.ui_projects
         KEY_ALERTS -> R.string.ui_alerts
         KEY_ACCESS -> R.string.ui_public_access
