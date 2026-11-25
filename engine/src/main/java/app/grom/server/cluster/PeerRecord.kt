@@ -18,6 +18,12 @@ import java.util.Base64
  * [app.grom.server.superserver.Plugin.scopedOps], which never include status,
  * credentials, configuration or anything that moves funds. A connected app is
  * never an operator.
+ *
+ * `ai.read` and `ai.chat` are the AI gateway grants (D94). They are separate
+ * from `services.call` because an AI request spends the operator's credit at a
+ * third party: reading the catalogue and paying for a completion are two
+ * decisions, so they are two scopes. A provider API key is never part of any
+ * grant — no scope lets a caller see or copy one.
  */
 enum class PeerScope(val wireName: String) {
     STATUS_READ("status.read"),
@@ -27,7 +33,13 @@ enum class PeerScope(val wireName: String) {
     SERVICES_READ("services.read"),
 
     /** Invoke the operations a service explicitly exposes to scoped clients. */
-    SERVICES_CALL("services.call");
+    SERVICES_CALL("services.call"),
+
+    /** See the AI catalogue and which providers are usable (D94). */
+    AI_READ("ai.read"),
+
+    /** Send chat requests through the operator's stored provider keys (D94). */
+    AI_CHAT("ai.chat");
 
     companion object {
 

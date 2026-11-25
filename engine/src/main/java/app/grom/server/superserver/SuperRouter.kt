@@ -59,6 +59,11 @@ class SuperRouter(
     /** The host APK's version, reported by `GET /grom/v1/connect` (D91). */
     private val gromVersion: () -> String = { "unknown" },
     /**
+     * The AI gateway (D94). Disabled by default, so a router built without one
+     * answers `503 AI_DISABLED` instead of pretending a provider exists.
+     */
+    private val ai: AiPort = AiPort.DISABLED,
+    /**
      * The measured data-plane endpoint, read at request time. A bind that has
      * not happened is reported as such; the route never invents an address.
      */
@@ -180,6 +185,28 @@ class SuperRouter(
 
             path.startsWith("$PLUGINS/") -> pluginRoute(path, request, principal)
 
+            path == AI_MODELS -> {
+                if (!hasScope(principal, PeerScope.AI_READ)) return scopeRequired()
+                if (request.method != "GET") return methodNotAllowed(request.method, "GET")
+                aiAnswer(ai.models())
+            }
+
+            path == AI_CHAT -> {
+                if (!hasScope(principal, PeerScope.AI_CHAT)) return scopeRequired()
+                if (request.method != "POST") return methodNotAllowed(request.method, "POST")
+                if (!isJson(request)) return unsupportedMediaType()
+                if (oversized(request)) return tooLarge()
+                aiAnswer(ai.openAiChat(request.body, client))
+            }
+
+            path == AI_MESSAGES || path == AI_MESSAGES_ALIAS -> {
+                if (!hasScope(principal, PeerScope.AI_CHAT)) return scopeRequired()
+                if (request.method != "POST") return methodNotAllowed(request.method, "POST")
+                if (!isJson(request)) return unsupportedMediaType()
+                if (oversized(request)) return tooLarge()
+                aiAnswer(ai.anthropicMessages(request.body, client))
+            }
+
             else -> error(404, "NOT_FOUND", "no such endpoint")
         }
     }
@@ -230,7 +257,6 @@ class SuperRouter(
         if (parts.size != 2 || parts[1] != "rpc") {
             return error(404, "NOT_FOUND", "no such endpoint")
         }
-        if (!canCallServices(principal)) return scopeRequired()
         if (request.method != "POST") return methodNotAllowed(request.method, "POST")
         if (!isJson(request)) return unsupportedMediaType()
         if (oversized(request)) return tooLarge()
@@ -245,8 +271,20 @@ class SuperRouter(
         // use services; it never says it may do anything a service can do. A
         // plugin declares the ops it exposes to a scoped caller, and the empty
         // default means an operator-only service.
-        if (principal !is SuperAuth.Principal.Operator && op !in plugin.scopedOps()) {
-            return scopeRequired()
+        //
+        // An operation may instead name its own scopes (D94): `ai.chat` is a
+        // narrower grant than `services.call`, and demanding it here is what
+        // keeps "may use services" from meaning "may spend AI credit". Such an
+        // op needs exactly those scopes — not `services.call` as well, which
+        // would force every AI client to hold a permission it never uses.
+        if (principal !is SuperAuth.Principal.Operator) {
+            val required = plugin.requiredScopes(op)
+            val allowed = if (required.isEmpty()) {
+                canCallServices(principal) && op in plugin.scopedOps()
+            } else {
+                required.all { hasScope(principal, it) }
+            }
+            if (!allowed) return scopeRequired()
         }
 
         val rawArgs = parsed["args"] ?: emptyMap<String, Any?>()
@@ -325,6 +363,7 @@ class SuperRouter(
             "uptimeMs" to uptimeMs(),
             "auth" to config.auth.name,
             "bind" to config.bind.name,
+            "ai" to ai.summary(),
             "plugins" to plugins.all().map { describe(it, includeStatus = true) }
         )
         base.putAll(serverStatus())
@@ -409,7 +448,48 @@ class SuperRouter(
                     emptyList<Any?>()
                 }
             ),
+            "ai" to aiDocument(principal),
             "endpoints" to ENDPOINTS
+        )
+    }
+
+    /**
+     * The AI gateway inside the discovery document (D94).
+     *
+     * The shape is published always — a client should be able to tell that this
+     * device *has* a gateway and that it needs `ai.read`. The provider and model
+     * catalogue is published only to a caller that holds `ai.read`, exactly like
+     * the service list, and it never contains an endpoint or a key.
+     */
+    private fun aiDocument(principal: SuperAuth.Principal?): Map<String, Any?> {
+        val summary = ai.summary()
+        val listed = principal != null && hasScope(principal, PeerScope.AI_READ)
+        val models = if (listed) {
+            (ai.models() as? AiAnswer.Json)?.payload?.get("models") ?: emptyList<Any?>()
+        } else {
+            emptyList<Any?>()
+        }
+        return linkedMapOf(
+            "path" to AI_PATH,
+            "models" to AI_MODELS,
+            "chat" to AI_CHAT,
+            "messages" to AI_MESSAGES,
+            "requires" to linkedMapOf(
+                "models" to PeerScope.AI_READ.wireName,
+                "chat" to PeerScope.AI_CHAT.wireName
+            ),
+            "enabled" to (summary["enabled"] as? Boolean ?: false),
+            "configured" to (summary["configured"] as? Boolean ?: false),
+            "listed" to listed,
+            "items" to models
+        )
+    }
+
+    private fun aiAnswer(answer: AiAnswer): SuperResponse = when (answer) {
+        is AiAnswer.Json -> json(answer.status, answer.payload)
+        is AiAnswer.Stream -> SuperResponse.Stream(
+            headers = mapOf("Content-Type" to answer.contentType),
+            write = answer.write
         )
     }
 
@@ -530,6 +610,14 @@ class SuperRouter(
         const val CONFIG: String = "/v1/config"
         const val PLUGINS: String = "/v1/plugins"
         const val EVENTS: String = "/v1/events"
+
+        /** The AI gateway (D94): catalogue, OpenAI shape, Anthropic shape. */
+        const val AI_PATH: String = "/v1/ai"
+        const val AI_MODELS: String = "$AI_PATH/models"
+        const val AI_CHAT: String = "$AI_PATH/chat/completions"
+        const val AI_MESSAGES: String = "$AI_PATH/messages"
+        /** Anthropic SDKs append `/v1/messages` to the base URL; both are served. */
+        const val AI_MESSAGES_ALIAS: String = "$AI_PATH/v1/messages"
         const val PAIR_IDENTITY: String = "/v1/pair/identity"
         const val PAIR_HELLO: String = "/v1/pair/hello"
         const val PAIR_POLL: String = "/v1/pair/poll"
@@ -543,7 +631,10 @@ class SuperRouter(
             "status" to STATUS,
             "config" to CONFIG,
             "plugins" to PLUGINS,
-            "events" to EVENTS
+            "events" to EVENTS,
+            "aiModels" to AI_MODELS,
+            "aiChat" to AI_CHAT,
+            "aiMessages" to AI_MESSAGES
         )
 
         private const val HEARTBEAT_MS: Long = 15_000

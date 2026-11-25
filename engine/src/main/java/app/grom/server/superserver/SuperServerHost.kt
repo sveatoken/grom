@@ -69,7 +69,13 @@ class SuperServerHost(
      * read from the package manager here, so the host class stays testable and
      * the `connect` document never reports a version the build did not stamp.
      */
-    private val version: () -> String = { "unknown" }
+    private val version: () -> String = { "unknown" },
+    /**
+     * The AI gateway (D94). It is built and owned by the runtime — the config
+     * lives beside every other store — so adding a provider key takes effect on
+     * the next request without rebinding the listener (D54).
+     */
+    private val ai: AiPort = AiPort.DISABLED
 ) {
 
     private val lock = Any()
@@ -300,7 +306,7 @@ class SuperServerHost(
                     )
                 },
                 LightningPlugin(backend, loaded.lightning.kind.wireName, backendError)
-            )
+            ) + listOfNotNull(ai.service())
         )
 
         val sessions = SessionStore(ttlMs = loaded.sessionTtlMs)
@@ -330,6 +336,7 @@ class SuperServerHost(
                 if (started == 0L) 0L else System.currentTimeMillis() - started
             },
             pairing = pairing,
+            ai = ai,
             configExport = configExport,
             gromVersion = version,
             dataPlane = {

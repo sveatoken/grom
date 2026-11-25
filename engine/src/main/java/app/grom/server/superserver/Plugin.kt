@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 package app.grom.server.superserver
 
+import app.grom.server.cluster.PeerScope
+
 /**
  * The plugin contract of the public data plane (D39, S5-R020…S5-R026).
  *
@@ -51,6 +53,18 @@ interface Plugin {
      * anything a service can do".
      */
     fun scopedOps(): Set<String> = emptySet()
+
+    /**
+     * The scopes an operation requires *instead of* `services.call` (D94).
+     *
+     * Empty is the established meaning: the op is either operator-only or one of
+     * [scopedOps]. A non-empty set names a narrower, purpose-built grant — the
+     * AI gateway uses `ai.read` and `ai.chat` so that holding "may use services"
+     * never means "may spend the operator's AI credit". The gate is the scopes,
+     * not `services.call`, because they say what the caller may do, not merely
+     * that it may call something.
+     */
+    fun requiredScopes(op: String): Set<PeerScope> = emptySet()
 
     /** Side-effect-free snapshot for `/v1/plugins`. Contains no secrets. */
     fun status(): Map<String, Any?>
