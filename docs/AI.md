@@ -152,7 +152,7 @@ export GROM_AI_LIVE_BASE_URL=https://api.deepseek.com
 export GROM_AI_LIVE_API_KEY=...            # never committed
 export GROM_AI_LIVE_MODEL=deepseek-chat
 export GROM_AI_LIVE_PROTOCOL=openai        # openai (default), anthropic or gemini
-/workspace/bright-turing/bin/gradle-mem :engine:testDebugUnitTest \
+gradle :engine:testDebugUnitTest \
   --tests 'app.grom.server.superserver.plugins.ai.AiGatewayIntegrationTest'
 ```
 
