@@ -388,4 +388,176 @@ class GromConnectClientTest {
             assertEquals("BAD_CONNECT_DOCUMENT", failure.code)
         }
     }
+
+    // ------------------------------------------------------------------- AI
+
+    @Test
+    fun `the connect document exposes the ai gateway even when it is off`() {
+        val document = """
+            {"ok":true,"schema":"grom-connect-v1","api":1,
+             "principal":{"kind":"peer","nodeId":"0123456789abcdef"},
+             "capabilities":[],
+             "ai":{"path":"/v1/ai","enabled":false,"configured":false,"listed":false,"items":[]},
+             "services":{"listed":false,"items":[]}}
+        """.trimIndent()
+        val transport = FakeTransport { GromHttpResponse(200, document) }
+        val info = client(transport).connect()
+        assertFalse(info.aiEnabled)
+        assertFalse(info.aiListed)
+        assertTrue(info.aiModels.isEmpty())
+    }
+
+    @Test
+    fun `an ai read credential sees the catalogue in connect`() {
+        val document = """
+            {"ok":true,"schema":"grom-connect-v1","api":1,
+             "principal":{"kind":"peer","nodeId":"0123456789abcdef"},
+             "capabilities":["ai.read"],
+             "ai":{"enabled":true,"configured":true,"listed":true,
+               "items":[{"id":"gpt-4o-mini","provider":"openai","providerTitle":"OpenAI",
+                         "title":"GPT-4o mini","available":true,"capabilities":["chat","stream"]}]},
+             "services":{"listed":false,"items":[]}}
+        """.trimIndent()
+        val transport = FakeTransport { GromHttpResponse(200, document) }
+        val info = client(transport).connect()
+        assertTrue(info.aiEnabled)
+        assertEquals(1, info.aiModels.size)
+        assertEquals("gpt-4o-mini", info.aiModels.single().id)
+        assertTrue(info.aiModels.single().supports("stream"))
+        assertFalse(info.aiModels.single().supports("images"))
+    }
+
+    @Test
+    fun `the catalogue is fetched with the documented path and parsed`() {
+        val transport = FakeTransport {
+            GromHttpResponse(
+                200,
+                """
+                {"ok":true,"defaultModel":"gpt-4o-mini","models":[
+                  {"id":"gpt-4o-mini","provider":"openai","providerTitle":"OpenAI",
+                   "title":"GPT-4o mini","available":true,"capabilities":["chat","stream"]},
+                  {"id":"claude","provider":"anthropic","providerTitle":"Anthropic",
+                   "title":"Claude","available":false,"capabilities":["chat"]}
+                ],"providers":[]}
+                """.trimIndent()
+            )
+        }
+        val catalog = client(transport).aiCatalog(GromCredential.Session("token"))
+        assertEquals("/v1/ai/models", transport.requests.single().url.substringAfter("47002"))
+        assertEquals("gpt-4o-mini", catalog.defaultModel)
+        assertEquals("gpt-4o-mini", catalog.preferred()!!.id)
+        assertNull(catalog.byId("claude")!!.let { if (it.available) it else null })
+    }
+
+    @Test
+    fun `a chat call posts the openai shape and returns the normalised answer`() {
+        val transport = FakeTransport {
+            GromHttpResponse(
+                200,
+                """
+                {"id":"chatcmpl-1","object":"chat.completion","model":"gpt-4o-mini",
+                 "choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],
+                 "usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4},
+                 "grom":{"provider":"openai","latencyMs":12}}
+                """.trimIndent()
+            )
+        }
+        val reply = client(transport).aiChat(
+            GromCredential.Session("token"),
+            "hi",
+            model = "gpt-4o-mini",
+            maxTokens = 8
+        )
+        assertEquals("hello", reply.text)
+        assertEquals("stop", reply.finishReason)
+        assertEquals("openai", reply.provider)
+        assertEquals(3L, reply.usage!!["prompt_tokens"])
+
+        val request = transport.requests.single()
+        assertEquals("/v1/ai/chat/completions", request.url.substringAfter("47002"))
+        assertEquals("Bearer token", request.headers["Authorization"])
+        assertTrue(request.body.contains("\"role\":\"user\""))
+        assertTrue(request.body.contains("\"max_tokens\":8"))
+    }
+
+    @Test
+    fun `an ai refusal keeps the server code`() {
+        val transport = FakeTransport {
+            GromHttpResponse(
+                403,
+                """{"ok":false,"error":{"code":"SCOPE_REQUIRED","message":"this credential does not allow that"}}"""
+            )
+        }
+        try {
+            client(transport).aiChat(GromCredential.Session("token"), "hi")
+            fail("expected a refusal")
+        } catch (failure: GromConnectException) {
+            assertEquals(403, failure.status)
+            assertEquals("SCOPE_REQUIRED", failure.code)
+        }
+    }
+
+    @Test
+    fun `a streamed answer is reported delta by delta and accumulated`() {
+        val transport = object : GromTransport {
+            override fun execute(request: GromHttpRequest): GromHttpResponse =
+                GromHttpResponse(500, "{}")
+
+            override fun stream(
+                request: GromHttpRequest,
+                onLine: (String) -> Boolean
+            ): GromHttpResponse {
+                assertTrue(request.body.contains("\"stream\":true"))
+                onLine("data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}")
+                onLine("")
+                onLine("data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}")
+                onLine("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}")
+                onLine("data: [DONE]")
+                return GromHttpResponse(200, "")
+            }
+        }
+        val seen = StringBuilder()
+        val reply = client(transport).aiChatStream(
+            GromCredential.Session("token"),
+            "hi",
+            onDelta = { seen.append(it) }
+        )
+        assertEquals("Hello", seen.toString())
+        assertEquals("Hello", reply.text)
+        assertEquals("stop", reply.finishReason)
+    }
+
+    @Test
+    fun `an error frame in a stream becomes a refusal not a partial answer`() {
+        val transport = object : GromTransport {
+            override fun execute(request: GromHttpRequest): GromHttpResponse =
+                GromHttpResponse(500, "{}")
+
+            override fun stream(
+                request: GromHttpRequest,
+                onLine: (String) -> Boolean
+            ): GromHttpResponse {
+                onLine("data: {\"error\":{\"code\":\"AI_UPSTREAM_UNAUTHORIZED\",\"message\":\"bad key\"}}")
+                onLine("data: [DONE]")
+                return GromHttpResponse(200, "")
+            }
+        }
+        try {
+            client(transport).aiChatStream(GromCredential.Session("token"), "hi") {}
+            fail("expected a refusal")
+        } catch (failure: GromConnectException) {
+            assertEquals("AI_UPSTREAM_UNAUTHORIZED", failure.code)
+        }
+    }
+
+    @Test
+    fun `a transport without streaming says so instead of faking a live answer`() {
+        val transport = FakeTransport { GromHttpResponse(200, "{}") }
+        try {
+            client(transport).aiChatStream(GromCredential.Session("token"), "hi") {}
+            fail("expected a refusal")
+        } catch (failure: GromConnectException) {
+            assertEquals("STREAM_NOT_SUPPORTED", failure.code)
+        }
+    }
 }

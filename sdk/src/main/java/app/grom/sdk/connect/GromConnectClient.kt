@@ -117,6 +117,159 @@ class GromConnectClient(
         )
     }
 
+    // ------------------------------------------------------------------- AI
+
+    /**
+     * `GET /v1/ai/models` (`ai.read`).
+     *
+     * The catalogue is what the operator allowed this device to spend on. It
+     * never names an upstream model, an endpoint or a key; an entry is only
+     * `available` while its provider is enabled and holds a stored key.
+     */
+    fun aiCatalog(credential: GromCredential): GromAiCatalog {
+        val body = decodeObject(call("GET", AI_MODELS_PATH, "", credential), "the AI catalogue")
+        return GromAiCatalog.from(body)
+    }
+
+    /**
+     * `POST /v1/ai/chat/completions` (`ai.chat`), the OpenAI-compatible shape.
+     *
+     * [body] is the OpenAI request document: `model`, `messages`, and the
+     * parameters listed in S7. The answer is returned as the provider-independent
+     * [GromAiReply] so a host does not have to parse three vendor dialects.
+     */
+    fun aiChat(credential: GromCredential, body: Map<String, Any?>): GromAiReply {
+        val answer = decodeObject(
+            call("POST", AI_CHAT_PATH, GromJson.encode(body), credential),
+            "the AI answer"
+        )
+        return GromAiReply.fromOpenAi(answer)
+    }
+
+    /** One prompt, one answer. The model defaults to the server's choice. */
+    fun aiChat(
+        credential: GromCredential,
+        prompt: String,
+        model: String? = null,
+        maxTokens: Int? = null,
+        temperature: Double? = null
+    ): GromAiReply {
+        require(prompt.isNotEmpty()) { "the prompt is empty" }
+        val body = linkedMapOf<String, Any?>(
+            "messages" to listOf(linkedMapOf("role" to "user", "content" to prompt))
+        )
+        model?.let { body["model"] = it }
+        maxTokens?.let { body["max_tokens"] = it }
+        temperature?.let { body["temperature"] = it }
+        return aiChat(credential, body)
+    }
+
+    /**
+     * The same call with `stream: true`, reported as it arrives.
+     *
+     * [onDelta] receives text fragments on the calling thread; the return value
+     * carries the complete text so a host can store the answer without
+     * concatenating twice. A provider error arrives as a [GromConnectException]
+     * carrying the server's own `AI_*` code.
+     */
+    fun aiChatStream(
+        credential: GromCredential,
+        prompt: String,
+        model: String? = null,
+        maxTokens: Int? = null,
+        onDelta: (String) -> Unit
+    ): GromAiReply {
+        require(prompt.isNotEmpty()) { "the prompt is empty" }
+        val body = linkedMapOf<String, Any?>(
+            "messages" to listOf(linkedMapOf("role" to "user", "content" to prompt)),
+            "stream" to true
+        )
+        model?.let { body["model"] = it }
+        maxTokens?.let { body["max_tokens"] = it }
+        return aiChatStream(credential, body, onDelta)
+    }
+
+    fun aiChatStream(
+        credential: GromCredential,
+        body: Map<String, Any?>,
+        onDelta: (String) -> Unit
+    ): GromAiReply {
+        val payload = GromJson.encode(body + ("stream" to true))
+        val path = AI_CHAT_PATH
+        val headers = LinkedHashMap<String, String>()
+        headers["Accept"] = "text/event-stream"
+        headers["Content-Type"] = "application/json; charset=utf-8"
+        when (credential) {
+            is GromCredential.Session -> headers["Authorization"] = "Bearer ${credential.token}"
+            is GromCredential.Key -> headers.putAll(
+                signedHeaders(credential.signer, "POST", path, payload)
+            )
+        }
+        val request = GromHttpRequest("POST", baseUrl + path, headers, payload)
+
+        val text = StringBuilder()
+        var finish: String? = null
+        var failure: GromConnectException? = null
+        val response = try {
+            transport.stream(request) { line ->
+                if (!line.startsWith("data:")) {
+                    true
+                } else {
+                    val data = line.removePrefix("data:").trim()
+                    when {
+                        data.isEmpty() -> true
+                        data == "[DONE]" -> false
+                        else -> {
+                            val event = try {
+                                GromJson.parseObject(data)
+                            } catch (_: IllegalArgumentException) {
+                                null
+                            }
+                            event?.let { parsed ->
+                                val error = parsed["error"] as? Map<*, *>
+                                if (error != null) {
+                                    failure = GromConnectException(
+                                        502,
+                                        error["code"] as? String ?: "AI_UPSTREAM_ERROR",
+                                        error["message"] as? String ?: "the AI request failed"
+                                    )
+                                    false
+                                } else {
+                                    val choice = (parsed["choices"] as? List<*>)
+                                        ?.firstOrNull() as? Map<*, *>
+                                    val delta = (choice?.get("delta") as? Map<*, *>)
+                                        ?.get("content") as? String
+                                    if (!delta.isNullOrEmpty()) {
+                                        text.append(delta)
+                                        onDelta(delta)
+                                    }
+                                    if (choice?.get("finish_reason") is String) {
+                                        finish = choice["finish_reason"] as String
+                                    }
+                                    true
+                                }
+                            } ?: true
+                        }
+                    }
+                }
+            }
+        } catch (failure0: GromConnectException) {
+            throw failure0
+        } catch (_: Exception) {
+            throw GromConnectException(0, "TRANSPORT_FAILED", "the server could not be reached")
+        }
+
+        failure?.let { throw it }
+        if (response.status !in 200..299) throw failure(response)
+        return GromAiReply(
+            text = text.toString(),
+            finishReason = finish,
+            model = null,
+            provider = null,
+            usage = null
+        )
+    }
+
     /** The session token as a ready-to-use credential. */
     fun session(token: String): GromCredential = GromCredential.Session(token)
 
@@ -219,6 +372,8 @@ class GromConnectClient(
         const val LOGIN_PATH: String = "/v1/auth/login"
         const val STATUS_PATH: String = "/v1/status"
         const val PLUGINS_PATH: String = "/v1/plugins"
+        const val AI_MODELS_PATH: String = "/v1/ai/models"
+        const val AI_CHAT_PATH: String = "/v1/ai/chat/completions"
 
         const val HEADER_KEY: String = "x-grom-key"
         const val HEADER_TIMESTAMP: String = "x-grom-timestamp"
@@ -330,9 +485,20 @@ data class GromHttpResponse(
 /**
  * The one seam a host replaces to use its own networking stack (or a test
  * double). It must not follow redirects: the signed path would change.
+ *
+ * [stream] is optional. It exists for the AI gateway, whose answers can arrive
+ * as server-sent events; a transport that cannot stream says so with a stable
+ * code instead of buffering the whole answer and pretending it was live (D97).
  */
 fun interface GromTransport {
     fun execute(request: GromHttpRequest): GromHttpResponse
+
+    fun stream(request: GromHttpRequest, onLine: (String) -> Boolean): GromHttpResponse =
+        throw GromConnectException(
+            0,
+            "STREAM_NOT_SUPPORTED",
+            "this transport cannot stream; use a transport that implements stream()"
+        )
 }
 
 /**
@@ -422,7 +588,12 @@ class GromConnect private constructor(
     val servicesListed: Boolean,
     val services: List<GromService>,
     val authMethods: List<String>,
-    val dataPlane: Map<String, Any?>
+    val dataPlane: Map<String, Any?>,
+    /** The AI gateway block (D94): present even when it is switched off. */
+    val aiEnabled: Boolean,
+    /** True when this credential may read the AI catalogue (`ai.read`). */
+    val aiListed: Boolean,
+    val aiModels: List<GromAiModel>
 ) {
 
     /** True when this server speaks the version [clientApi] implements. */
@@ -445,6 +616,7 @@ class GromConnect private constructor(
             val auth = body["auth"] as? Map<*, *> ?: emptyMap<String, Any?>()
             val services = body["services"] as? Map<*, *>
             val principal = body["principal"] as? Map<*, *>
+            val ai = body["ai"] as? Map<*, *>
             @Suppress("UNCHECKED_CAST")
             val dataPlane = body["dataPlane"] as? Map<String, Any?> ?: emptyMap()
             return GromConnect(
@@ -463,7 +635,10 @@ class GromConnect private constructor(
                 servicesListed = services?.get("listed") as? Boolean ?: false,
                 services = GromService.listFrom(services?.get("items")),
                 authMethods = strings(auth["methods"]),
-                dataPlane = dataPlane
+                dataPlane = dataPlane,
+                aiEnabled = ai?.get("enabled") as? Boolean ?: false,
+                aiListed = ai?.get("listed") as? Boolean ?: false,
+                aiModels = GromAiModel.listFrom(ai?.get("items"))
             )
         }
 
@@ -478,6 +653,96 @@ class GromConnect private constructor(
 /** A password session: a random token that expires (S5-R014). */
 data class GromSession(val token: String, val expiresAtMs: Long)
 
+/**
+ * One model the operator made available (D94).
+ *
+ * [available] is derived from configuration on the server — an enabled provider
+ * with a stored key and an enabled model — and is not a promise that the
+ * provider will answer. A host should render it as "callable", not "healthy".
+ */
+data class GromAiModel(
+    val id: String,
+    val provider: String,
+    val providerTitle: String,
+    val title: String,
+    val available: Boolean,
+    val capabilities: List<String>
+) {
+    fun supports(feature: String): Boolean = feature in capabilities
+
+    internal companion object {
+        fun listFrom(raw: Any?): List<GromAiModel> {
+            val list = raw as? List<*> ?: return emptyList()
+            return list.mapNotNull { item ->
+                val map = item as? Map<*, *> ?: return@mapNotNull null
+                val id = map["id"] as? String ?: return@mapNotNull null
+                GromAiModel(
+                    id = id,
+                    provider = map["provider"] as? String ?: "",
+                    providerTitle = map["providerTitle"] as? String ?: "",
+                    title = map["title"] as? String ?: id,
+                    available = map["available"] as? Boolean ?: true,
+                    capabilities = (map["capabilities"] as? List<*>)
+                        ?.mapNotNull { it as? String } ?: emptyList()
+                )
+            }
+        }
+    }
+}
+
+/** `GET /v1/ai/models`: the callable catalog plus the operator's default. */
+data class GromAiCatalog(
+    val defaultModel: String?,
+    val models: List<GromAiModel>
+) {
+    /** The model to send when the host has no preference. */
+    fun preferred(): GromAiModel? =
+        models.firstOrNull { it.id == defaultModel && it.available }
+            ?: models.firstOrNull { it.available }
+
+    fun byId(id: String): GromAiModel? = models.firstOrNull { it.id == id }
+
+    internal companion object {
+        fun from(body: Map<String, Any?>): GromAiCatalog = GromAiCatalog(
+            defaultModel = (body["defaultModel"] as? String)?.takeIf { it.isNotEmpty() },
+            models = GromAiModel.listFrom(body["models"])
+        )
+    }
+}
+
+/**
+ * A provider-independent answer (D94).
+ *
+ * [usage] is what the provider reported, in the normalised shape
+ * (`prompt_tokens` / `completion_tokens`); a provider that reports nothing
+ * leaves it null rather than inventing zeros.
+ */
+data class GromAiReply(
+    val text: String,
+    val finishReason: String?,
+    val model: String?,
+    val provider: String?,
+    val usage: Map<String, Any?>?
+) {
+    internal companion object {
+        fun fromOpenAi(body: Map<String, Any?>): GromAiReply {
+            val choice = (body["choices"] as? List<*>)
+                ?.firstOrNull() as? Map<*, *>
+            val message = choice?.get("message") as? Map<*, *>
+            val grom = body["grom"] as? Map<*, *>
+            @Suppress("UNCHECKED_CAST")
+            val usage = body["usage"] as? Map<String, Any?>
+            return GromAiReply(
+                text = message?.get("content") as? String ?: "",
+                finishReason = choice?.get("finish_reason") as? String,
+                model = body["model"] as? String,
+                provider = grom?.get("provider") as? String,
+                usage = usage
+            )
+        }
+    }
+}
+
 /** The successful answer of one plugin call. */
 data class GromRpcResult(
     val plugin: String,
@@ -491,7 +756,11 @@ data class GromRpcResult(
  * loopback or LAN address (D47), so a host that needs confidentiality through a
  * hostile network should point [GromConnectClient] at a tunnel it trusts.
  */
-class UrlConnectionTransport(private val timeoutMs: Int = 8_000) : GromTransport {
+class UrlConnectionTransport(
+    private val timeoutMs: Int = 8_000,
+    /** A streaming answer may legitimately take longer than a small JSON call. */
+    private val streamTimeoutMs: Int = 120_000
+) : GromTransport {
 
     override fun execute(request: GromHttpRequest): GromHttpResponse {
         val connection = URL(request.url).openConnection() as HttpURLConnection
@@ -514,6 +783,50 @@ class UrlConnectionTransport(private val timeoutMs: Int = 8_000) : GromTransport
             val stream = if (status in 200..299) connection.inputStream else connection.errorStream
             val body = stream?.bufferedReader(Charsets.UTF_8)?.use { readCapped(it) } ?: ""
             return GromHttpResponse(status, body, headersOf(connection))
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    /**
+     * Streams the body line by line (D97). The head is written exactly as
+     * [execute] writes it; only the read differs, so a server that ignores
+     * `stream` still produces a usable (single-shot) answer.
+     */
+    override fun stream(
+        request: GromHttpRequest,
+        onLine: (String) -> Boolean
+    ): GromHttpResponse {
+        val connection = URL(request.url).openConnection() as HttpURLConnection
+        try {
+            connection.requestMethod = request.method
+            connection.instanceFollowRedirects = false
+            connection.connectTimeout = timeoutMs
+            connection.readTimeout = streamTimeoutMs
+            connection.useCaches = false
+            for ((name, value) in request.headers) {
+                connection.setRequestProperty(name, value)
+            }
+            if (request.body.isNotEmpty()) {
+                val bytes = request.body.toByteArray(Charsets.UTF_8)
+                connection.doOutput = true
+                connection.setFixedLengthStreamingMode(bytes.size)
+                connection.outputStream.use { it.write(bytes) }
+            }
+            val status = connection.responseCode
+            if (status !in 200..299) {
+                val body = connection.errorStream
+                    ?.bufferedReader(Charsets.UTF_8)
+                    ?.use { readCapped(it) } ?: ""
+                return GromHttpResponse(status, body, headersOf(connection))
+            }
+            connection.inputStream.bufferedReader(Charsets.UTF_8).use { reader ->
+                while (true) {
+                    val line = reader.readLine() ?: break
+                    if (!onLine(line)) break
+                }
+            }
+            return GromHttpResponse(status, "", headersOf(connection))
         } finally {
             connection.disconnect()
         }
