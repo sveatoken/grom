@@ -1526,3 +1526,78 @@ thing to keep secure.
 
 *Enforced by:* `GromConnectClientTest`, `GromJsonTest`, `ConnectExampleTest`,
 `ConnectRouterTest` (parity), `tools/test-policy` #58.
+
+## D94 — the AI gateway is a protocol router on the existing data plane
+**ACCEPTED.** "One AI endpoint for every app" could be a new server, a new port
+and a new credential model. It is none of those: a request arrives on the public
+data plane that already exists, the operator's saved configuration selects a
+provider, and one of three wire adapters speaks that provider's own dialect
+(OpenAI-compatible, Anthropic, Gemini). A new vendor is a `custom` row with a
+protocol and an endpoint — not an APK update, and not a new class.
+
+Two rules make it more than a proxy. The **catalogue is the spending limit**: a
+model that is not registered is refused (`AI_UNKNOWN_MODEL`) rather than forwarded
+under the provider's own name, because the operator approved specific models and
+specific costs. And the **requested parameters are an allow-list**: a field the
+gateway does not implement (`tools`, `response_format`, image content) is refused
+with its own name, because a client that receives a plain answer while asking for
+tool calls would conclude the model ignored it.
+
+The gateway is also a service (`ai`), so an app that already speaks
+`/v1/plugins/{id}/rpc` needs no new transport; both surfaces call one
+`AiGateway`, so there is one implementation and one set of rules.
+
+*Enforced by:* `AiGatewayTest`, `AiRouterTest`, `AiGatewayIntegrationTest`,
+`ConnectExampleTest`, `tools/test-policy` #63 and #64.
+
+## D95 — a provider key is sealed, unprojected, and only ever sent to its endpoint
+**ACCEPTED.** A provider API key is a bearer secret for a third-party account:
+whoever holds it spends the operator's money. It is therefore treated like the
+Lightning credential (D44): sealed with a non-exportable Android keystore key
+before it is written, opened for the duration of one upstream request, and never
+projected. The operator view says `keySet: true`; the data-plane view says only
+that a provider is `configured`. No status, export, error, header or log carries
+the key — the upstream error text is kept, truncated, after the key is removed
+from what Grom composes (Grom never echoes the request, so it cannot echo the key).
+
+The endpoint is held to the same standard. It must be `https`, or `http` only for
+a loopback host so a local runtime (llama.cpp, Ollama, LM Studio) still works
+while a key cannot travel in clear text off the device. Redirects are never
+followed: a `Location` would move the key to a host the operator never approved.
+
+*Enforced by:* `AiStoreTest` (the plaintext never reaches the file),
+`AiGatewayTest` (no endpoint or key in a projection), `tools/test-policy` #60 and
+#62.
+
+## D96 — an AI lamp is measured, on demand, and never derived
+**ACCEPTED.** A provider row that is enabled, has a key and looks correct proves
+nothing: the key can be revoked, the endpoint can be wrong and the model can be
+retired. The gateway therefore reports **no** health until the operator presses
+**Test** (or an app makes a call), and **Test** is one tiny upstream request
+(`max_tokens: 1`) whose real latency and result become the lamp. There is no
+scheduler, no background probe and no cached "healthy": the same rule the Doctor
+(D80) and the fleet (D74) already follow.
+
+`available` in the catalogue is configuration, and S7-R005 says so explicitly, so
+a client does not turn an enabled row into a health claim.
+
+*Enforced by:* `AiGatewayTest` (probe measurement, no dial for a disabled or
+unconfigured provider), `tools/test-policy` #64 (no scheduler in the package).
+
+## D97 — streaming is server-sent events on the existing listener
+**ACCEPTED.** Streaming needed no new protocol, port or framing: the data plane
+already writes `SuperResponse.Stream` for the operator event bus, so the gateway
+reuses that head/handoff path and emits the two shapes its clients already parse
+(OpenAI `data:` chunks ending in `[DONE]`, Anthropic named events ending in
+`message_stop`).
+
+The ordering is the part that matters. Everything that can fail without a network
+— unknown model, disabled provider, missing key, an oversized body — is decided
+**before** the head is written, so a client never receives `200` and then learns
+the request was rejected (S7-R015). A failure after the head becomes an error
+event. The client closing the connection stops the upstream read; Grom does not
+keep reading a provider for a caller that is gone.
+
+*Enforced by:* `AiGatewayTest` (frames, early close, mid-stream failure),
+`AiRouterTest` (the router hands a `Stream` through), `AiGatewayIntegrationTest`
+(real SSE over a real socket).

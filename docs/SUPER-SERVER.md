@@ -492,3 +492,29 @@ None of it is in `GET /v1/health`, which answers without credentials (S5-R042).
 See [`NOTIFICATIONS.md`](NOTIFICATIONS.md) for setup, the event table, the
 delivery limits and what cannot work: when the process is dead, no alert is
 sent, because Grom is the sender.
+
+## 12. The AI gateway on this listener
+
+The AI gateway is not a second listener: it is three routes and one service on
+the data plane this document describes.
+
+| route | scope | shape |
+|---|---|---|
+| `GET /v1/ai/models` | `ai.read` | the callable catalogue |
+| `POST /v1/ai/chat/completions` | `ai.chat` | OpenAI request/answer, `stream: true` for SSE |
+| `POST /v1/ai/v1/messages` (alias `/v1/ai/messages`) | `ai.chat` | Anthropic request/answer |
+| `POST /v1/plugins/ai/rpc` | `ai.read` / `ai.chat` | the same gateway as a service call |
+
+It inherits every rule on this page — the bind mode, the body cap, the rate
+limiter, the credential modes and the connection limits — and adds three of its
+own: the provider endpoint must be `https` or loopback `http`, redirects are never
+followed, and the operator's API keys are sealed and never projected. `connect`
+carries an `ai` block, `/v1/status` carries a summary without endpoints, and
+`/v1/health` is untouched.
+
+A gateway call spends money at a third party, so it has its own budget: 20
+requests per minute per client. Everything that can fail without a network is
+decided before a socket is opened; see
+[docs/AI.md](AI.md) for the operator guide and
+[specs/S7](specs/S7-ai-gateway.md) for the contract.
+

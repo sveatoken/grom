@@ -113,8 +113,8 @@ check "no usesCleartextTraffic" \
 #     supplied at runtime, never compiled in (D48).
 #     The pattern requires a host character after the scheme: a literal like
 #     startsWith("https://") is a security check, not an endpoint.
-check "exactly two compiled outbound hosts, each in one file" \
-  bash -c "! grep -rnE 'https?://[A-Za-z0-9]' $MAIN $APP_MAIN --include='*.kt' --exclude='UpdateChecker.kt' --exclude='TelegramNotifier.kt' && grep -q 'https://api.github.com/repos/' $APP_MAIN/update/UpdateChecker.kt && grep -q 'https://api.telegram.org' $MAIN/notify/TelegramNotifier.kt && [ \$(grep -rl 'api\.telegram\.org' $MAIN --include='*.kt' | wc -l) -eq 1 ]"
+check "compiled outbound hosts are allow-listed defaults, never call sites" \
+  bash -c "! grep -rnE 'https?://[A-Za-z0-9]' $MAIN $APP_MAIN --include='*.kt' --exclude='UpdateChecker.kt' --exclude='TelegramNotifier.kt' --exclude='AiProvider.kt' && grep -q 'https://api.github.com/repos/' $APP_MAIN/update/UpdateChecker.kt && grep -q 'https://api.telegram.org' $MAIN/notify/TelegramNotifier.kt && [ \$(grep -rl 'api\.telegram\.org' $MAIN --include='*.kt' | wc -l) -eq 1 ] && [ \$(grep -rl 'https://api\.openai\.com' $MAIN --include='*.kt' | wc -l) -eq 1 ] && ! grep -q 'api\.openai\.com' $MAIN/superserver/plugins/ai/AiGateway.kt && ! grep -q 'api\.openai\.com' $MAIN/superserver/plugins/ai/AiDocuments.kt"
 
 # 18. binding every interface requires an explicit acknowledgement (D41)
 check "public bind requires acknowledgement" \
@@ -285,7 +285,7 @@ check "the doctor block is three fields and stays out of the exports" \
 #     kept its own literal that nobody bumped. The runtime must therefore report
 #     the SDK constant and carry no numeric literal of its own.
 check "the runtime reports the SDK's API version, not its own literal" \
-  bash -c "grep -q 'override fun apiVersion(): Int = GromClient.API_VERSION' $MAIN/ServerRuntime.kt && ! grep -qE 'override fun apiVersion\(\): Int = [0-9]' $MAIN/ServerRuntime.kt && grep -q 'const val API_VERSION: Int = 9' sdk/src/main/java/app/grom/sdk/GromClient.kt"
+  bash -c "grep -q 'override fun apiVersion(): Int = GromClient.API_VERSION' $MAIN/ServerRuntime.kt && ! grep -qE 'override fun apiVersion\(\): Int = [0-9]' $MAIN/ServerRuntime.kt && grep -q 'const val API_VERSION: Int = 10' sdk/src/main/java/app/grom/sdk/GromClient.kt"
 
 # 49. a phone can hold two Groms (D85). The embedding host must be able to pick
 #     the loopback control port, and a port that is taken must be reported as
@@ -350,7 +350,7 @@ check "the connect document is a named data-plane route" \
 #     default, the op check runs in the router, and the money adapter publishes
 #     nothing.
 check "scoped services are op-level and never an operator key" \
-  bash -c "grep -q 'SERVICES_READ(\"services.read\")' $MAIN/cluster/PeerRecord.kt && grep -q 'SERVICES_CALL(\"services.call\")' $MAIN/cluster/PeerRecord.kt && grep -q 'fun scopedOps(): Set<String> = emptySet()' $MAIN/superserver/Plugin.kt && grep -q 'op !in plugin.scopedOps()' $MAIN/superserver/SuperRouter.kt && grep -q 'AgentChannel.OPS - \"status\"' $MAIN/superserver/AgentPlugin.kt && grep -q 'override fun scopedOps(): Set<String> = emptySet()' $MAIN/superserver/plugins/lightning/LightningPlugin.kt && grep -q 'canCallServices(principal)' $MAIN/superserver/SuperRouter.kt"
+  bash -c "grep -q 'SERVICES_READ(\"services.read\")' $MAIN/cluster/PeerRecord.kt && grep -q 'SERVICES_CALL(\"services.call\")' $MAIN/cluster/PeerRecord.kt && grep -q 'fun scopedOps(): Set<String> = emptySet()' $MAIN/superserver/Plugin.kt && grep -q 'op in plugin.scopedOps()' $MAIN/superserver/SuperRouter.kt && grep -q 'required.all { hasScope(principal, it) }' $MAIN/superserver/SuperRouter.kt && grep -q 'AgentChannel.OPS - \"status\"' $MAIN/superserver/AgentPlugin.kt && grep -q 'override fun scopedOps(): Set<String> = emptySet()' $MAIN/superserver/plugins/lightning/LightningPlugin.kt && grep -q 'canCallServices(principal)' $MAIN/superserver/SuperRouter.kt"
 
 # 58. the client SDK carries no key and no dependency (D93). A host supplies a
 #     GromSigner; the library never generates, stores or exports key material,
@@ -364,6 +364,37 @@ check "the SDK is dependency-free, key-free and pinned to one signature" \
 #     and health is untouched.
 check "connect lists nothing anonymously and never reuses the status" \
   bash -c "grep -q 'connectDocument(null)' $MAIN/superserver/SuperRouter.kt && grep -q '\"listed\" to listed' $MAIN/superserver/SuperRouter.kt && ! grep -q 'serverStatus()' <(sed -n '/private fun connectDocument/,/^    }/p' $MAIN/superserver/SuperRouter.kt) && ! grep -q '/grom/v1/connect' $MAIN/superserver/SuperStatusDocument.kt $MAIN/superserver/ConfigExport.kt $MAIN/cluster/FleetStatus.kt"
+
+
+# 60. provider API keys are sealed at rest and never projected (D94, D95). The
+#     stored field is a SecretBox ciphertext, the operator view says only whether
+#     a key exists, and the public view has neither the key nor the endpoint.
+check "ai provider keys are sealed at rest and never projected" \
+  bash -c "grep -q 'apiKeySealed' $MAIN/superserver/plugins/ai/AiProvider.kt && grep -q 'secretBox.seal' $MAIN/superserver/plugins/ai/AiStore.kt && ! grep -q '\"apiKey\" to' $MAIN/superserver/plugins/ai/AiDocuments.kt && ! grep -q 'apiKeySealed' $MAIN/superserver/plugins/ai/AiDocuments.kt && ! grep -q 'baseUrl' $MAIN/superserver/plugins/ai/AiDocuments.kt && grep -q '\"baseUrl\" to baseUrl' $MAIN/superserver/plugins/ai/AiProvider.kt && grep -q '\"keySet\" to' $MAIN/superserver/plugins/ai/AiProvider.kt"
+
+# 61. AI access is its own pair of scopes (D94). Reading the catalogue and
+#     spending the operator's credit are separate grants, and the AI service
+#     publishes no scopedOp — so a `services.call` credential can never reach it.
+check "ai access is its own scope and services call cannot spend credit" \
+  bash -c "grep -q 'AI_READ(\"ai.read\")' $MAIN/cluster/PeerRecord.kt && grep -q 'AI_CHAT(\"ai.chat\")' $MAIN/cluster/PeerRecord.kt && grep -q 'fun requiredScopes(op: String): Set<PeerScope> = emptySet()' $MAIN/superserver/Plugin.kt && grep -q 'plugin.requiredScopes(op)' $MAIN/superserver/SuperRouter.kt && grep -q 'override fun scopedOps(): Set<String> = emptySet()' $MAIN/superserver/plugins/ai/AiPlugin.kt && grep -q 'PeerScope.AI_CHAT' $MAIN/superserver/SuperRouter.kt && grep -q 'PeerScope.AI_READ' $MAIN/superserver/SuperRouter.kt"
+
+# 62. an AI endpoint is https, or plain http only on the loopback (D95). The
+#     rule is enforced when the provider is saved and again by the transport,
+#     which also refuses to follow a redirect — a Location would move the key.
+check "an ai endpoint is https or loopback http and checked before a dial" \
+  bash -c "grep -q 'INSECURE_PROVIDER_URL' $MAIN/superserver/plugins/ai/AiProvider.kt && grep -q 'LOOPBACK_HOSTS' $MAIN/superserver/plugins/ai/AiProvider.kt && grep -q 'provider.validate()' $MAIN/superserver/plugins/ai/AiStore.kt && grep -q 'instanceFollowRedirects = false' $MAIN/superserver/net/AiHttpTransport.kt && grep -q 'provider.validate()' $MAIN/superserver/plugins/ai/AiProvider.kt"
+
+# 63. the provider adapters open no socket of their own (D94). One transport in
+#     `superserver/net/` is the only place a connection exists, which is what
+#     keeps every protocol test runnable on the JVM without a network.
+check "ai provider code opens no socket of its own" \
+  bash -c "! grep -rqE 'openConnection|Socket\(|HttpURLConnection|java\.net\.' $MAIN/superserver/plugins/ai && grep -q 'class AiHttpTransport' $MAIN/superserver/net/AiHttpTransport.kt && grep -q 'interface AiTransport' $MAIN/superserver/plugins/ai/AiTransport.kt"
+
+# 64. the AI gateway is published under ai.read, is wired into the host, and
+#     never polls (D94, D96). There is no scheduler in the package: a provider
+#     lamp changes only when the operator presses Test or makes a call.
+check "the ai catalogue is published only under ai read and nothing polls" \
+  bash -c "grep -q 'private fun aiDocument' $MAIN/superserver/SuperRouter.kt && grep -q 'PeerScope.AI_READ' $MAIN/superserver/SuperRouter.kt && ! grep -rqE 'ScheduledExecutor|Timer\(|scheduleAtFixedRate|postDelayed' $MAIN/superserver/plugins/ai && grep -q 'ai = aiGateway' $MAIN/ServerRuntime.kt && grep -q 'ai.service()' $MAIN/superserver/SuperServerHost.kt && grep -q 'ai = ai,' $MAIN/superserver/SuperServerHost.kt"
 
 echo
 TOTAL=$((PASS + FAIL))

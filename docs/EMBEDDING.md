@@ -130,7 +130,7 @@ missing. Ask the server for the truth:
 ```kotlin
 val client = GromEmbed.newClient(context)   // Target.EMBEDDED
 client.bind(object : GromClient.Listener {
-    override fun onConnected(apiVersion: Int) { /* apiVersion == 9 */ }
+    override fun onConnected(apiVersion: Int) { /* apiVersion == 10 */ }
     override fun onDisconnected(reason: String) { /* show the reason */ }
 })
 val status = client.call(null) { it.statusJson() }
@@ -205,6 +205,11 @@ disk.
 | `peerGrantJson(json)` | **API 7**: one-way trust for an inbound reader such as a VPS hub (D76–D78) |
 | `doctorJson()` | **API 8**: one measured Doctor report — read-only, works while the server is stopped, contains no credential or address (D80–D84) |
 | `superSaveConfig(json)` | **API 9**: validate and apply a data-plane document with the screen's own contract; refusals carry the screen's code and write nothing (D86) |
+| `aiStatusJson()` | **API 10**: the AI gateway as the operator sees it — providers, `keySet`, catalogue, default, last measured probe (D94) |
+| `aiSaveProviderJson(json)` / `aiRemoveProvider(id)` | **API 10**: add or change a provider (`apiKey` is plaintext in, sealed on write) or remove it with its models (D95) |
+| `aiSaveModelJson(json)` / `aiRemoveModel(id)` | **API 10**: the catalogue a host may offer |
+| `aiConfigureJson(json)` | **API 10**: `{enabled?, defaultModel?}`, absent fields kept |
+| `aiProbeProviderJson(providerId)` | **API 10**: one measured `max_tokens: 1` upstream call; the only thing that can make a provider lamp green (D96) |
 
 ### Choosing the control port (D85)
 

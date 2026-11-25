@@ -23,7 +23,7 @@ grom/
 ├── examples/connect/       the compiled Kotlin client example (S6)
 ├── testapps/               samecert / foreigncert — the C-008 evidence
 ├── web/                    the static download page (GitHub Pages, D49)
-├── docs/                   000-decisions, specs S1–S6, F1 plan, master plan, roadmap, guides
+├── docs/                   000-decisions, specs S1–S7, F1 plan, master plan, roadmap, guides
 ├── tools/                  gates, plus grom-fleet, grom-hub and grom-provision
 ├── scripts/                test keys and the arm64 Node runtime pipeline
 ├── third_party/            the dependency ledger
@@ -64,10 +64,31 @@ second process (D58).
 | Doctor (why Android stops the server) | **delivered in code** — measured checks, honest `unknown`, run marker, API 8, three booleans in `/v1/status` (D80–D84) |
 | Doctor on a device | **open** — no physical phone has been measured |
 | "2 in 1" (host app ships Grom) | **delivered in code** — host-chosen or automatic control port, versioned consent, host-readable health, host-configured data plane (API 9), a ~1.6 MB release peripheral build (2.2 MB debug); guide in `docs/TWO-IN-ONE.md` (D85–D90) |
+| Client connect (S6) | **delivered in code** — `GET /grom/v1/connect`, `services.read`/`services.call` with per-op allow-lists, a dependency-free Kotlin client and a compiled example (D91–D93) |
+| AI gateway | **delivered in code** — one local AI API over your own keys: OpenAI/Anthropic/Gemini protocols, seven vendor presets plus any custom endpoint, a sealed-key store, a model catalogue, OpenAI- and Anthropic-compatible routes with streaming, `ai.read`/`ai.chat` scopes, API 10; guide in `docs/AI.md`, contract in `docs/specs/S7-ai-gateway.md` (D94–D97) |
+| AI gateway against a live provider | **open** — every shape is proven against a real loopback provider and fakes; a live vendor call needs the operator's own key (`GROM_AI_LIVE_*`) |
 
 When the runtime is genuinely absent, the app reports `MISSING_RUNTIME` and the
 agent endpoints answer `503` naming the missing file. That is the designed
 behaviour (D31), not a bug.
+
+## AI gateway
+
+Grom can be the AI endpoint for the apps you trust, using **your** provider keys:
+OpenAI, Anthropic, Gemini, DeepSeek, Qwen, Kimi, OpenRouter, or any endpoint that
+speaks one of the three protocols. The phone holds the key, you choose the models,
+and a connected app gets a catalogue — never a credential.
+
+```
+GET  /v1/ai/models             ai.read    the callable catalogue
+POST /v1/ai/chat/completions   ai.chat    OpenAI shape, streaming or not
+POST /v1/ai/v1/messages        ai.chat    Anthropic shape
+```
+
+Set it up in **Menu → AI gateway** (provider, key, model, **Test**), then grant a
+key `ai.read`/`ai.chat` in **Devices → Trust a key**. Read
+[docs/AI.md](docs/AI.md) for the operator guide and
+[docs/specs/S7-ai-gateway.md](docs/specs/S7-ai-gateway.md) for the contract.
 
 ## Install
 
@@ -313,7 +334,7 @@ when (val write = project.put("theme", "dark")) {
 
 That namespace (`p:<projectId>:<key>`, API 4 `projectExec`) is an ownership gate
 on the API, not a sandbox between apps in the same UID. See
-[`docs/EMBEDDING.md`](docs/EMBEDDING.md) for the IPC surface (API 4 to 9), the
+[`docs/EMBEDDING.md`](docs/EMBEDDING.md) for the IPC surface (API 4 to 10), the
 runtime requirement and the trust-boundary cost.
 
 Shipping "2 in 1" — the app and the server in one package — has its own guide:

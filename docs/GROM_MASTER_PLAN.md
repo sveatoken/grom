@@ -1057,6 +1057,26 @@ The reverse is deliberately weaker: the control keeps a cached view with the
 timestamp of the last heartbeat and the UI says `last seen 4 minutes ago`, never
 "running". A stale view presented as live is exactly the lie S1-R017 forbids.
 
+### M.9 The AI gateway: one local endpoint, the operator's own keys
+
+A phone that serves other apps will be asked for AI completions, and the worst
+answer is "every app talks to every vendor with its own key". The gateway is the
+other answer: **one local API on the data plane that already exists** (D94), the
+operator's stored credentials, and a catalogue that doubles as the spending limit.
+
+| layer | decision |
+|---|---|
+| protocols | three wire shapes — OpenAI-compatible, Anthropic, Gemini — and `custom` with any of them; a new vendor is configuration, not an app update |
+| credentials | sealed by the keystore before they are written, never projected, only ever sent to the endpoint the operator typed (D95) |
+| permissions | `ai.read` and `ai.chat`, separate from `services.call`; no scope reveals a key |
+| honesty | no background probing; a provider is "measured" only by an explicit test or a real call (D96) |
+| streaming | server-sent events on the existing listener, pre-flight refusals before the head (D97) |
+
+What this is not: an account, a relay, a billing surface, a proxy for arbitrary
+URLs, or a place where a phone's data leaves without the operator having chosen
+the destination. It is also not — yet — a tools/function-calling or multimodal
+gateway: a request that asks for those is refused by name rather than narrowed.
+
 ## N. Storage and databases
 
 ### N.1 The default: SQLite through `node:sqlite`

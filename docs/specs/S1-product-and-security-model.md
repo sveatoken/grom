@@ -324,3 +324,14 @@ own Ed25519 key (or a password session the operator enabled), it cannot read the
 audit surface, the event stream or the configuration export without the matching
 scope, and it cannot invoke an operation a service does not publish to scoped
 callers. `services.call` MUST NOT be treated as a weaker operator token.
+
+### S1-R048 (D94, D95)
+The AI gateway is an **outbound case**, and it is the only one whose destination
+comes from an operator-entered base URL rather than a compiled-in host: a request
+MUST go only to the endpoint of a saved, enabled provider that has a stored key,
+and to no other host. The endpoint MUST use `https`, or `http` only when the host
+is loopback. Redirects MUST NOT be followed. A provider API key MUST be sealed at
+rest, MUST NOT appear in any status, export, error or log, and MUST NOT be
+readable through any scope: `ai.read` and `ai.chat` grant the catalogue and the
+completion, never the credential. The gateway MUST NOT poll, probe in the
+background, or contact any host merely because it is configured.

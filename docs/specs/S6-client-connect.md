@@ -354,7 +354,36 @@ class KeystoreSigner(private val keyStore: KeyStore, private val alias: String) 
 
 The key never enters this library (D93).
 
-## 12. Out of scope
+## 12. The AI gateway (D94)
+
+An application that wants a completion does not need a second connection or a
+second credential: the AI gateway is part of the same data plane and the same
+scope model.
+
+### S6-R029
+`GET /grom/v1/connect` carries an `ai` block (`enabled`, `configured`, the two
+required scopes, the route paths). A client MUST read it before offering an AI
+feature, and MUST NOT assume a gateway exists because the build supports one.
+
+### S6-R030
+`GET /v1/ai/models` (`ai.read`) is the catalogue: ids, providers and
+`available`. `available` is configuration, not health — a client MUST NOT paint
+it green (D96). The catalogue never contains an endpoint or a key.
+
+### S6-R031
+`POST /v1/ai/chat/completions` and `POST /v1/ai/v1/messages` (`ai.chat`) send the
+OpenAI and Anthropic shapes; `stream: true` returns server-sent events. A client
+MUST treat `AI_UPSTREAM_*`, `AI_TIMEOUT`, `AI_UNREACHABLE` and `AI_BAD_RESPONSE`
+as provider problems, not as its own bug, and MUST NOT retry an
+`AI_UNSUPPORTED_PARAM` or `AI_UNKNOWN_MODEL` unchanged.
+
+### S6-R032
+`services.call` MUST NOT be used to reach the AI gateway, and `ai.chat` does not
+require it: the `ai` service publishes no `scopedOps`, and its operations are
+gated by `ai.read`/`ai.chat`. A client MUST NOT ask the operator for an operator
+token to make an AI request.
+
+## 13. Out of scope
 
 * **MCP** — not implemented. `/v1/plugins/{id}/rpc` already carries the same
   capability description and call shape; an MCP adapter can be a separate,

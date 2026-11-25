@@ -77,7 +77,7 @@ signature get all of them in F1. The interface also declares
 ### S4-R012
 `apiVersion()` returns `1` for F1. Clients MUST check it before assuming a
 method exists. API 2 returns `2` (S4-R028). Each later API section states the
-value it adds; the current contract is API 9, so the value is `9` (§14).
+value it adds; the current contract is API 10, so the value is `10` (§15).
 
 ### S4-R013
 `auditTail(int)` clamps `maxEntries` to 1…200, matching S2-R018.
@@ -131,7 +131,7 @@ matching signature is sufficient.
 ### S4-R021
 `testapps/samecert` is signed with the Grom test key. On a device where Grom is
 installed, it MUST bind and its listener MUST fire `onConnected(apiVersion)` with
-the contract version the server implements (`9` in API 9, §14).
+the contract version the server implements (`10` in API 10, §15).
 
 ### S4-R022
 `testapps/foreigncert` is signed with a different key. `bindService` MUST return
@@ -422,13 +422,53 @@ the stored password hash or any secret. It MUST pass the same per-transaction
 signature gate as every other method (S4-R007), and `apiVersion()` MUST still
 report `GromClient.API_VERSION` rather than a literal.
 
-## 15. The embed layer a host calls (D88–D90)
+## 15. API 10 — the AI gateway (D94–D97)
+
+`apiVersion()` returns `10`. API 10 is additive: every API 1–9 method is
+unchanged. It adds seven methods:
+
+```aidl
+String aiStatusJson();
+String aiSaveProviderJson(String json);
+String aiRemoveProvider(String id);
+String aiSaveModelJson(String json);
+String aiRemoveModel(String id);
+String aiConfigureJson(String json);
+String aiProbeProviderJson(String providerId);
+```
+
+### S4-R052 (API 10)
+`aiStatusJson()` MUST return the operator view: providers with their endpoint,
+`keySet`, `configured`, `modelCount` and the last measured probe; models with
+their upstream name and enabled flag; the default model; the load error and the
+measured probes. It MUST NOT return an API key in any form, a sealed ciphertext or
+a password hash, and MUST pass the per-transaction signature gate (S4-R007).
+
+### S4-R053 (API 10)
+`aiSaveProviderJson`, `aiSaveModelJson`, `aiConfigureJson`, `aiRemoveProvider` and
+`aiRemoveModel` MUST validate through the same rules the screen uses, MUST write
+nothing on a refusal, and MUST fail with an `IllegalStateException` carrying
+`GROM_E_<CODE>` so a host can act on `BAD_PROVIDER_URL`, `INSECURE_PROVIDER_URL`,
+`AI_UNKNOWN_MODEL` or `UNKNOWN_PROVIDER` instead of "it failed". A plaintext
+`apiKey` MUST be sealed before the document is written and MUST NOT be echoed
+back. Removing a provider MUST also remove the models that pointed at it and any
+default that would dangle.
+
+### S4-R054 (API 10)
+`aiProbeProviderJson(providerId)` MUST make one real, minimal request to the
+provider's endpoint and MUST report the measured result (`ok`, `code`, `detail`,
+`latencyMs`, `atMs`, `model`). It MUST NOT run on a timer, MUST NOT be called by
+`aiStatusJson`, and MUST refuse a disabled or unconfigured provider without
+dialling. `apiVersion()` MUST still report `GromClient.API_VERSION` rather than a
+literal.
+
+## 16. The embed layer a host calls (D88–D90)
 
 The Binder contract is what a *client* uses. An embedding host uses a thin
 Kotlin layer on top of it, and that layer carries rules of its own because every
 host would otherwise re-implement them slightly wrongly.
 
-### S4-R052 — consent covers a notice version
+### S4-R055 — consent covers a notice version
 `GromEmbed.recordConsent` MUST store the operator's answer together with the
 notice version it was given for and the time it was recorded, and MUST clear the
 record when the answer is `false`. `GromEmbed.start` MUST refuse with
@@ -437,7 +477,7 @@ the host declares a notice version different from the recorded one. A host that
 declares no notice version MUST keep the pre-D88 behaviour. The record MUST stay
 in the host's private preferences and MUST NOT be transmitted anywhere.
 
-### S4-R053 — the control port is decided before the start
+### S4-R056 — the control port is decided before the start
 `GromEmbed.start` MUST resolve the port through `ControlPort.resolve` **before**
 asking the platform for a foreground service, and MUST persist the resolved port.
 `GromEmbed.AUTO_PORT` MUST be an explicit opt-in that selects a free port from
@@ -447,7 +487,7 @@ serving (the answer is `PORT_CHANGE_RESTART_REQUIRED`), and MUST report
 `PORT_IN_USE` when the range is exhausted. Every refusal is a stable code
 returned to the caller; none is a silent fallback.
 
-### S4-R054 — health is a projection of the Doctor, and codes are the contract
+### S4-R057 — health is a projection of the Doctor, and codes are the contract
 `EmbedHealth.of(report)` MUST derive its state, headline and advice from a
 `DoctorReport` and MUST NOT measure anything itself. It MUST produce
 `EmbedState.RUNNING` only when every check measured `OK`; a `BAD` or `UNKNOWN`

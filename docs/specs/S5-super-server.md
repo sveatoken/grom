@@ -522,3 +522,20 @@ that reads the full status, changes configuration, or moves funds. A service's
 `status` block MUST be present only for a caller holding `status.read`. Every
 other route — `/v1/events`, `/v1/auth/logout`, pairing, the control plane — MUST
 keep answering `403 SCOPE_REQUIRED` for a scoped peer.
+
+### S5-R059 (D94)
+`GET /v1/ai/models` MUST require `ai.read`; `POST /v1/ai/chat/completions`,
+`POST /v1/ai/messages` and `POST /v1/ai/v1/messages` MUST require `ai.chat`. The
+`ai` service MUST publish an empty `scopedOps` and declare its operations through
+`Plugin.requiredScopes`, so `services.call` never implies an AI request. Every AI
+route MUST pass the request rate limiter and MUST enforce the request bounds
+before any upstream connection is opened.
+
+### S5-R060 (D94, D97)
+The `connect` document MUST carry an `ai` block with `enabled`, `configured`,
+the two required scopes and the route paths. Its `items` MUST be empty unless the
+caller holds `ai.read`. Neither the block nor `/v1/status` nor `GET /v1/config`
+MUST contain a provider endpoint or a key. Streaming answers MUST use
+`SuperResponse.Stream` on the existing listener with
+`Content-Type: text/event-stream`, MUST decide every pre-flight refusal before
+writing the head, and MUST stop reading the provider when the client disconnects.

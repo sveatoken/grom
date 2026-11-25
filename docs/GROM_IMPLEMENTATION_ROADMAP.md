@@ -634,3 +634,39 @@ Not closed: MCP is not implemented (the RPC already describes and calls a
 service; an adapter can be a separate bridge when an MCP-only client appears);
 `/v1/events` stays operator-only, so a scoped client refreshes on open, not by
 push; and no third-party application has been built against the SDK in CI yet.
+
+### Phase 1M — AI gateway — **done**
+
+Grom can be the AI endpoint of the phone: one local API, the operator's own
+provider accounts, and a catalogue that is also the spending limit.
+
+| decision | change |
+|---|---|
+| **D94** | `AiGateway`: three upstream protocols (OpenAI-compatible, Anthropic, Gemini) behind `POST /v1/ai/chat/completions`, `POST /v1/ai/messages`, `POST /v1/ai/v1/messages`, and a `ai` service for clients that already speak `/v1/plugins/{id}/rpc`. Seven vendor presets plus `custom` (any of the three protocols); a model outside the catalogue is never forwarded; a parameter Grom does not implement is refused by name |
+| **D95** | keys sealed by `SecretBox` before they are written, never projected (operator view says `keySet`), endpoints `https` or loopback `http` only, redirects never followed, upstream error text truncated and free of URL and key |
+| **D96** | the gateway never polls: a provider is measured only by the operator's **Test** (one `max_tokens: 1` call) or by a real request; `available` in the catalogue is configuration, and S7 says so |
+| **D97** | streaming rides `SuperResponse.Stream`: pre-flight refusals are JSON before the head, later failures are error events, and a client disconnect stops the upstream read |
+
+Scopes grew by exactly two — `ai.read` and `ai.chat` — and `services.call`
+deliberately grants neither: the `ai` service publishes an empty `scopedOps` and
+declares its operations through `Plugin.requiredScopes`. API **10** adds seven
+Binder methods for the screen (`aiStatusJson`, `aiSaveProviderJson`,
+`aiRemoveProvider`, `aiSaveModelJson`, `aiRemoveModel`, `aiConfigureJson`,
+`aiProbeProviderJson`).
+
+`docs/AI.md` is the operator guide and `docs/specs/S7-ai-gateway.md` the
+integrator contract; `app.grom.sdk.connect` gained `aiCatalog`, `aiChat` and
+`aiChatStream`.
+
+Gate: `tools/run-gates` **13/13**, policy **64/64** (#60 keys sealed and
+unprojected, #61 ai scopes, #62 endpoint policy, #63 no socket in the adapters,
+#64 published under `ai.read` and nothing polls), `AiProviderTest` **13**,
+`AiStoreTest` **14**, `AiGatewayTest` **26**, `AiRouterTest` **11**,
+`AiGatewayIntegrationTest` **4** (three over a real loopback socket, one opt-in
+live call), `GromConnectClientTest` **+8**, lint 0/0.
+
+Not closed: tools/function calling, images, audio and embeddings are refused
+rather than implemented; no vendor has been called with a real key from this
+repository (the live test is opt-in via `GROM_AI_LIVE_*`); and a vendor SDK needs
+a password session token, because it cannot sign Grom's Ed25519 requests.
+
