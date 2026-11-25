@@ -38,6 +38,13 @@ import app.grom.server.notify.TelegramNotifier
 import app.grom.server.projects.ProjectNamespace
 import app.grom.server.projects.ProjectRegistry
 import app.grom.server.service.GromPrefs
+import app.grom.server.superserver.plugins.ai.AiConfigEditor
+import app.grom.server.superserver.plugins.ai.AiDocuments
+import app.grom.server.superserver.plugins.ai.AiEdit
+import app.grom.server.superserver.plugins.ai.AiGateway
+import app.grom.server.superserver.plugins.ai.AiInputs
+import app.grom.server.superserver.plugins.ai.AiStore
+import app.grom.server.superserver.net.AiHttpTransport
 import app.grom.server.ssh.SshAuth
 import app.grom.server.ssh.SshKeys
 import app.grom.server.ssh.SshTarget
@@ -87,6 +94,16 @@ class ServerRuntime(
     private val projectRegistry = ProjectRegistry(File(rootDir, ProjectRegistry.FILE_NAME))
     private val secretBox = AndroidKeystoreSecretBox()
     private val sshStore = SshTargetStore(File(rootDir, SshTargetStore.FILE_NAME), secretBox)
+
+    /**
+     * The AI gateway (D94). The store owns the sealed provider keys; the gateway
+     * reads the document per request, so a key added from the screen is live on
+     * the next call without restarting the data plane (D54). It is built even in
+     * the peripheral role — the store is inert until a provider is added — but
+     * only the server role connects it to a listener.
+     */
+    private val aiStore = AiStore(File(rootDir, AiStore.FILE_NAME), secretBox)
+    private val aiGateway = AiGateway(store = aiStore, transport = AiHttpTransport())
 
     /**
      * This device's fleet identity and its paired peers (D70-D75). Both stores
@@ -193,7 +210,8 @@ class ServerRuntime(
             peerKeys = { fleet.peerKeys() },
             doctor = { doctorStatusBlock() },
             configExport = { configExportJson() },
-            version = { hostVersion(context) }
+            version = { hostVersion(context) },
+            ai = aiGateway
         )
     }
 
@@ -481,6 +499,118 @@ class ServerRuntime(
             )
             return status()
         }
+    }
+
+    // ------------------------------------------------- AI gateway (API 10)
+
+    /**
+     * The operator-facing AI document (D94): providers with their endpoints and
+     * whether a key is stored, the catalogue, and the last measured probe. No
+     * key — sealed or plain — ever leaves the device through this method (D95).
+     */
+    fun aiStatusJson(): String = Json.encode(aiStatusDocument())
+
+    /**
+     * Adds or changes a provider. A plaintext `apiKey` in the document is sealed
+     * here and only the ciphertext is written; omitting it keeps the stored key.
+     */
+    fun aiSaveProviderJson(raw: String?): String {
+        synchronized(lock) {
+            val (input, problem) = AiInputs.provider(raw.orEmpty())
+            if (problem != null) throw ApiException(problem.status, problem.code, problem.message)
+            val key = input!!.apiKey
+            val sealed = if (key == null) {
+                null
+            } else {
+                aiStore.sealKey(key)
+                    ?: throw ApiException(
+                        503,
+                        "AI_KEY_SEAL_FAILED",
+                        "the platform refused to seal the API key"
+                    )
+            }
+            val edited = requireAiEdit(AiConfigEditor.upsertProvider(aiGateway.load(), input, sealed))
+            persistAi(edited, "ai.provider.saved", "id=${input.id} keySet=${key != null}")
+            return aiStatusJson()
+        }
+    }
+
+    fun aiRemoveProvider(id: String): String {
+        synchronized(lock) {
+            val edited = requireAiEdit(AiConfigEditor.removeProvider(aiGateway.load(), id.trim()))
+            persistAi(edited, "ai.provider.removed", "id=${id.trim()}")
+            return aiStatusJson()
+        }
+    }
+
+    fun aiSaveModelJson(raw: String?): String {
+        synchronized(lock) {
+            val (input, problem) = AiInputs.model(raw.orEmpty())
+            if (problem != null) throw ApiException(problem.status, problem.code, problem.message)
+            val edited = requireAiEdit(AiConfigEditor.upsertModel(aiGateway.load(), input!!))
+            persistAi(edited, "ai.model.saved", "id=${input.id} provider=${input.providerId}")
+            return aiStatusJson()
+        }
+    }
+
+    fun aiRemoveModel(id: String): String {
+        synchronized(lock) {
+            val edited = requireAiEdit(AiConfigEditor.removeModel(aiGateway.load(), id.trim()))
+            persistAi(edited, "ai.model.removed", "id=${id.trim()}")
+            return aiStatusJson()
+        }
+    }
+
+    /** `{enabled?: Boolean, defaultModel?: String|null}`; absent fields are kept. */
+    fun aiConfigureJson(raw: String?): String {
+        synchronized(lock) {
+            val root = JsonParser.parseObjectOrNull(raw.orEmpty())
+                ?: throw ApiException(400, "AI_BAD_INPUT", "the document must be a JSON object")
+            var config = aiGateway.load()
+            (root["enabled"] as? Boolean)?.let { enabled ->
+                config = requireAiEdit(AiConfigEditor.withEnabled(config, enabled))
+            }
+            if (root.containsKey("defaultModel")) {
+                config = requireAiEdit(
+                    AiConfigEditor.withDefaultModel(config, root["defaultModel"] as? String)
+                )
+            }
+            persistAi(config, "ai.configured", "enabled=${config.enabled} default=${config.defaultModel}")
+            return aiStatusJson()
+        }
+    }
+
+    /**
+     * One measured probe against the provider's own endpoint (D96). It is the
+     * only way a provider can look healthy: the configuration alone proves
+     * nothing, and nothing here runs in the background.
+     */
+    fun aiProbeProviderJson(id: String): String =
+        Json.encode(aiGateway.probe(id.trim()))
+
+    private fun aiStatusDocument(): Map<String, Any?> = AiDocuments.operatorStatus(
+        config = aiGateway.load(),
+        loadError = aiGateway.lastError() ?: aiStore.lastError,
+        probes = aiGateway.probeSnapshot()
+    )
+
+    private fun requireAiEdit(edit: AiEdit): app.grom.server.superserver.plugins.ai.AiGatewayConfig =
+        when (edit) {
+            is AiEdit.Ok -> edit.config
+            is AiEdit.Failure -> throw ApiException(
+                edit.problem.status,
+                edit.problem.code,
+                edit.problem.message
+            )
+        }
+
+    private fun persistAi(
+        config: app.grom.server.superserver.plugins.ai.AiGatewayConfig,
+        action: String,
+        detail: String
+    ) {
+        aiStore.save(config)?.let { throw ApiException(it.status, it.code, it.message) }
+        safeAudit(action, detail)
     }
 
     override fun exec(op: String, argsJson: String?): HttpResponse {

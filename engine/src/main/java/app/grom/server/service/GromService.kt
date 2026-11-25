@@ -157,6 +157,53 @@ class GromService : Service() {
             }
         }
 
+        // ---------------------------------------------- API 10 (D94-D96)
+
+        override fun aiStatusJson(): String {
+            requireSameSigner()
+            return runtime.aiStatusJson()
+        }
+
+        override fun aiSaveProviderJson(json: String?): String {
+            requireSameSigner()
+            return aiGuard { runtime.aiSaveProviderJson(json) }
+        }
+
+        override fun aiRemoveProvider(id: String?): String {
+            requireSameSigner()
+            return aiGuard { runtime.aiRemoveProvider(id.orEmpty()) }
+        }
+
+        override fun aiSaveModelJson(json: String?): String {
+            requireSameSigner()
+            return aiGuard { runtime.aiSaveModelJson(json) }
+        }
+
+        override fun aiRemoveModel(id: String?): String {
+            requireSameSigner()
+            return aiGuard { runtime.aiRemoveModel(id.orEmpty()) }
+        }
+
+        override fun aiConfigureJson(json: String?): String {
+            requireSameSigner()
+            return aiGuard { runtime.aiConfigureJson(json) }
+        }
+
+        override fun aiProbeProviderJson(providerId: String?): String {
+            requireSameSigner()
+            return aiGuard { runtime.aiProbeProviderJson(providerId.orEmpty()) }
+        }
+
+        /**
+         * The gateway's own codes cross the Binder, so the screen can say
+         * "the API key was rejected" instead of "it failed" (S4-R016).
+         */
+        private inline fun aiGuard(block: () -> String): String = try {
+            block()
+        } catch (failure: ApiException) {
+            throw IllegalStateException("GROM_E_${failure.code}: ${failure.message}")
+        }
+
         // ------------------------------------------------ API 3 (D55, S4 §8)
 
         override fun projectsJson(): String {

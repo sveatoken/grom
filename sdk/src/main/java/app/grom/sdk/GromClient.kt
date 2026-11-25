@@ -191,6 +191,6 @@ class GromClient(
          * adds the measured Doctor report (D80-D84); API 9 adds a supported way
          * for an embedding host to configure the data plane (D86).
          */
-        const val API_VERSION: Int = 9
+        const val API_VERSION: Int = 10
     }
 }

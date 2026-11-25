@@ -8,15 +8,14 @@ import org.junit.Test
 /**
  * The constants an outside client compiles against (S4-R012, S4-R020).
  *
- * The API version is bumped whenever a method is added, so a client that was
- * built for API 8 knows to check before calling an API 9 method (a supported
- * way for an embedding host to configure the data plane, D86).
+ * The API version is bumped whenever a method is added, so a client built for
+ * API 9 knows to check before calling an API 10 method (the AI gateway, D94).
  */
 class GromClientContractTest {
 
     @Test
-    fun `api version is 9`() {
-        assertEquals(9, GromClient.API_VERSION)
+    fun `api version is 10`() {
+        assertEquals(10, GromClient.API_VERSION)
     }
 
     @Test

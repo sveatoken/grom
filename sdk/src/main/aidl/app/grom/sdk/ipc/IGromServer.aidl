@@ -203,4 +203,41 @@ interface IGromServer {
      * Returns the sanitised server status; secrets never travel back (D86).
      */
     String superSaveConfig(String json);
+
+    // ------------------------------------------------------- API 10 (D94-D96)
+
+    /**
+     * The AI gateway as the operator sees it: providers (with endpoint and
+     * whether a key is stored), the model catalogue, the default model and the
+     * last measured probe. No API key, sealed or otherwise, is ever returned
+     * (D95).
+     */
+    String aiStatusJson();
+
+    /**
+     * Adds or changes a provider. `apiKey` is plaintext and is sealed by the
+     * engine before it is written; omitting it keeps the stored key and
+     * `clearKey:true` removes it. Returns the new status; a refusal is an
+     * ApiException with the stable code, and nothing is written.
+     */
+    String aiSaveProviderJson(String json);
+
+    /** Removes a provider and the models that pointed at it. Returns the status. */
+    String aiRemoveProvider(String id);
+
+    /** Adds or changes a catalogue model (id, provider, upstream, title, enabled). */
+    String aiSaveModelJson(String json);
+
+    /** Removes one model; a dangling default is cleared. Returns the status. */
+    String aiRemoveModel(String id);
+
+    /** `{enabled?: Boolean, defaultModel?: String|null}`; absent fields are kept. */
+    String aiConfigureJson(String json);
+
+    /**
+     * One measured probe against the provider's own endpoint, with a one-token
+     * request. It is the only way a provider can look healthy: configuration is
+     * not a measurement, and nothing here runs in the background (D96).
+     */
+    String aiProbeProviderJson(String providerId);
 }
