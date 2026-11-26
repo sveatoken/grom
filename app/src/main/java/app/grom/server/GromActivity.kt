@@ -3274,7 +3274,12 @@ class GromActivity : Activity() {
         val signature = buildString {
             append(sshAvailable)
             for (target in sshTargets) {
+                // The separator before the flag matters: without it `state` and
+                // `current` run together ("connectedtrue"), so two different
+                // rows could in principle produce one signature and the list
+                // would keep a stale "current" mark.
                 append('|').append(target["id"]).append(':').append(target["state"])
+                    .append(':').append(target["current"] == true)
             }
         }
         if (signature == lastSshSignature) return
@@ -3857,8 +3862,20 @@ class GromActivity : Activity() {
         val host = (target["host"] as? String) ?: ""
         val port = (target["port"] as? Number)?.toInt() ?: 22
 
+        val isCurrent = target["current"] == true
         val column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        column.addView(text(labelText, 15f, palette.onSurface, Typeface.BOLD))
+        column.addView(
+            text(
+                if (isCurrent) {
+                    getString(R.string.ssh_row_title_current, labelText)
+                } else {
+                    labelText
+                },
+                15f,
+                if (isCurrent) palette.accent else palette.onSurface,
+                Typeface.BOLD
+            )
+        )
         column.addView(
             text(
                 getString(R.string.ssh_row_detail, user, host, port),
@@ -3952,7 +3969,13 @@ class GromActivity : Activity() {
         if (connected) {
             addAction(R.string.ssh_action_disconnect, primary = true) { disconnectTarget(id) }
         } else {
-            addAction(R.string.ssh_action_connect, primary = true) { connectTarget(id, null) }
+            addAction(R.string.ssh_action_connect, primary = true) { sshRun(id, null, false) }
+        }
+        // The check that answers "why does my address and password not work"
+        // without needing the data plane (D106).
+        addAction(R.string.ssh_action_test, primary = false) { sshRun(id, null, true) }
+        if (target["current"] != true) {
+            addAction(R.string.ssh_action_use, primary = false) { useTarget(id) }
         }
         val publicLine = target["publicKeyLine"] as? String
         if (!publicLine.isNullOrBlank()) {
@@ -3968,58 +3991,133 @@ class GromActivity : Activity() {
         dialog.show()
     }
 
-    private fun connectTarget(id: String, trustFingerprint: String?) {
+    /**
+     * Runs a connect or a credential check (D105, D106).
+     *
+     * Both go through the same reply handling on purpose: a first-use host key
+     * has to be confirmed either way, and a failure has to be explained the
+     * same way — the code names the stage that broke, so the operator reads a
+     * sentence instead of `SSH_HOST_UNREACHABLE`.
+     */
+    private fun sshRun(id: String, trustFingerprint: String?, verify: Boolean) {
         val server = client.server
         if (server == null) {
             toast(getString(R.string.toast_not_bound, getString(R.string.ssh_action_connect)))
             return
         }
-        toast(getString(R.string.ssh_connecting))
+        toast(getString(if (verify) R.string.ssh_testing else R.string.ssh_connecting))
         Thread({
-            val raw = runCatching { server.sshConnect(id, trustFingerprint) }.getOrNull()
+            val raw = runCatching {
+                if (verify) {
+                    server.sshVerify(id, trustFingerprint)
+                } else {
+                    server.sshConnect(id, trustFingerprint)
+                }
+            }.getOrNull()
             val parsed = raw?.let { JsonParser.parseObjectOrNull(it) }
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 when {
+                    parsed?.get("ok") == true && parsed["state"] == "verified" -> {
+                        // "Checked" is not "connected": with the data plane off
+                        // the forward was never attempted, and saying otherwise
+                        // would be the lie this screen exists to avoid.
+                        toast(
+                            getString(
+                                if (parsed["forwardChecked"] == true) {
+                                    R.string.ssh_verified_forward
+                                } else {
+                                    R.string.ssh_verified
+                                }
+                            )
+                        )
+                        refreshNow()
+                    }
                     parsed?.get("ok") == true -> {
                         toast(getString(R.string.ssh_connected))
                         refreshNow()
                     }
                     parsed?.get("code") == "HOST_KEY_UNVERIFIED" -> {
                         val fingerprint = parsed["fingerprint"] as? String
-                        if (fingerprint != null) confirmHostKey(id, fingerprint)
+                        if (fingerprint != null) confirmHostKey(id, fingerprint, verify)
                     }
                     parsed?.get("code") == "HOST_KEY_MISMATCH" -> {
                         confirmHostKeyChange(
                             id,
                             parsed["pinned"] as? String,
-                            parsed["fingerprint"] as? String
+                            parsed["fingerprint"] as? String,
+                            verify
                         )
                     }
                     else -> {
-                        val code = parsed?.get("code") as? String
-                            ?: parsed?.get("message") as? String
-                            ?: getString(R.string.ssh_state_failed)
-                        toast(getString(R.string.ssh_error, code))
+                        toast(sshErrorText(parsed?.get("code") as? String))
                         refreshNow()
                     }
                 }
             }
-        }, "grom-ssh-connect").start()
+        }, if (verify) "grom-ssh-verify" else "grom-ssh-connect").start()
     }
 
-    private fun confirmHostKey(id: String, fingerprint: String) {
+    /**
+     * The failure as a sentence. The code is still the contract (docs/SSH-BRIDGE
+     * lists every one), but an operator should not have to read a document to
+     * learn that the password was rejected.
+     */
+    private fun sshErrorText(code: String?): String = when (code) {
+        "SSH_AUTH_FAILED" -> getString(R.string.ssh_err_auth)
+        "SSH_HOST_UNKNOWN" -> getString(R.string.ssh_err_host_unknown)
+        "SSH_HOST_UNREACHABLE" -> getString(R.string.ssh_err_host_unreachable)
+        "SSH_TIMEOUT" -> getString(R.string.ssh_err_timeout)
+        "SSH_HANDSHAKE_FAILED" -> getString(R.string.ssh_err_handshake)
+        "SSH_FORWARD_REFUSED" -> getString(R.string.ssh_err_forward)
+        "DATA_PLANE_NOT_RUNNING" -> getString(R.string.ssh_err_data_plane)
+        "PASSWORD_MISSING", "KEY_MISSING" -> getString(R.string.ssh_err_credential)
+        "TOO_MANY_TUNNELS" -> resources.getQuantityString(
+            R.plurals.ssh_err_too_many,
+            SshTarget.MAX_ACTIVE,
+            SshTarget.MAX_ACTIVE
+        )
+        "SSH_UNAVAILABLE" -> getString(R.string.ssh_unavailable)
+        else -> getString(R.string.ssh_error, code ?: getString(R.string.ssh_state_failed))
+    }
+
+    private fun useTarget(id: String) {
+        val server = client.server
+        if (server == null) {
+            toast(getString(R.string.toast_not_bound, getString(R.string.ssh_action_use)))
+            return
+        }
+        Thread({
+            val ok = runCatching { server.sshSetActiveJson(id) }.isSuccess
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                toast(
+                    getString(
+                        if (ok) R.string.ssh_current_set else R.string.ssh_current_failed
+                    )
+                )
+                refreshNow()
+            }
+        }, "grom-ssh-current").start()
+    }
+
+    private fun confirmHostKey(id: String, fingerprint: String, verify: Boolean) {
         AlertDialog.Builder(this)
             .setTitle(R.string.ssh_confirm_title)
             .setMessage(getString(R.string.ssh_confirm_body, fingerprint))
             .setPositiveButton(R.string.ssh_confirm_action) { _, _ ->
-                connectTarget(id, fingerprint)
+                sshRun(id, fingerprint, verify)
             }
             .setNegativeButton(R.string.dialog_cancel, null)
             .show()
     }
 
-    private fun confirmHostKeyChange(id: String, pinned: String?, observed: String?) {
+    private fun confirmHostKeyChange(
+        id: String,
+        pinned: String?,
+        observed: String?,
+        verify: Boolean
+    ) {
         AlertDialog.Builder(this)
             .setTitle(R.string.ssh_mismatch_title)
             .setMessage(
@@ -4031,7 +4129,7 @@ class GromActivity : Activity() {
             )
             .setPositiveButton(R.string.ssh_mismatch_action) { _, _ ->
                 clearPin(id)
-                connectTarget(id, null)
+                sshRun(id, null, verify)
             }
             .setNegativeButton(R.string.dialog_cancel, null)
             .show()

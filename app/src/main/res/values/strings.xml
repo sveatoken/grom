@@ -222,9 +222,9 @@
     <string name="menu_help_sub">What Grom does, in plain language</string>
 
     <!-- External SSH servers (D58). -->
-    <string name="ssh_add">Add server</string>
+    <string name="ssh_add">Add SSH server</string>
     <string name="ssh_none">No external servers saved</string>
-    <string name="ssh_hint">A reverse SSH tunnel you start yourself. Grom only forwards the public API port; it never runs a shell on the server.</string>
+    <string name="ssh_hint">A reverse SSH tunnel you start yourself. Grom only forwards the public API port; it never runs a shell on the server. Add as many servers as you like and mark one as current.</string>
     <string name="ssh_state_connected">connected</string>
     <string name="ssh_state_connecting">connecting</string>
     <string name="ssh_state_disconnected">not connected</string>
@@ -272,6 +272,28 @@
     <string name="ssh_saved">Server saved</string>
     <string name="ssh_key_required">Generate or paste a private key</string>
     <string name="ssh_password_required">Enter a password</string>
+
+    <!-- More than one VPS and an honest credential check (D105-D107). -->
+    <string name="ssh_action_test">Test connection</string>
+    <string name="ssh_action_use">Use this server</string>
+    <string name="ssh_row_title_current">%1$s \u00b7 current</string>
+    <string name="ssh_testing">Checking the server\u2026</string>
+    <string name="ssh_verified">Address, host key and password accepted. The tunnel was not tested because the public API is off.</string>
+    <string name="ssh_verified_forward">Address, host key, password and forward port all accepted.</string>
+    <string name="ssh_current_set">This is now your current server</string>
+    <string name="ssh_current_failed">Could not change the current server</string>
+    <string name="ssh_err_auth">The server rejected the username or the password.</string>
+    <string name="ssh_err_host_unknown">That host name could not be resolved. Check the spelling, or use the IP address.</string>
+    <string name="ssh_err_host_unreachable">Nothing accepted a connection on that address and port. Is sshd running, and is the port open?</string>
+    <string name="ssh_err_timeout">No answer in time. A firewall or the wrong port is the usual cause.</string>
+    <string name="ssh_err_handshake">The host answered, but the SSH handshake did not complete.</string>
+    <string name="ssh_err_forward">The server refused the remote forward port. Is it already in use?</string>
+    <string name="ssh_err_data_plane">The public API is off, so there is nothing to forward to. Use Test connection first.</string>
+    <string name="ssh_err_credential">No credential is stored for this server. Edit it and add a password or a key.</string>
+    <plurals name="ssh_err_too_many">
+        <item quantity="one">%1$d tunnel is already connected. Disconnect it first.</item>
+        <item quantity="other">%1$d tunnels are already connected. Disconnect one first.</item>
+    </plurals>
 
     <!-- Local projects (D55). -->
     <string name="projects_empty">No projects registered</string>
