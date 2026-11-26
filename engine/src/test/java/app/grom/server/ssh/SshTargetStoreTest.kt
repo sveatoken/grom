@@ -227,6 +227,64 @@ class SshTargetStoreTest {
         assertNotNull(store.lastError)
     }
 
+    /**
+     * A pasted password usually arrives with a trailing newline. Storing it
+     * would create a secret that can never authenticate, and the server's
+     * answer to it is indistinguishable from a wrong password (D105).
+     */
+    @Test
+    fun `a password with a pasted line break is refused with the reason`() {
+        val store = store()
+        val failure = runCatching {
+            store.upsert(passwordDraft().copy(password = "s3cret-pass\n"))
+        }.exceptionOrNull()
+        assertTrue(failure is ApiException)
+        assertEquals("BAD_PASSWORD", (failure as ApiException).code)
+        assertTrue(
+            "the message has to say what to do",
+            failure.message.orEmpty().contains("control character")
+        )
+        assertTrue("nothing may be written", store.list().isEmpty())
+    }
+
+    @Test
+    fun `the current server is one id that survives save, clear and delete`() {
+        val store = store()
+        val first = store.upsert(passwordDraft())
+        val second = store.upsert(
+            passwordDraft().copy(label = "other vps", host = "198.51.100.7", remoteForwardPort = 47003)
+        )
+        assertNull("nothing is current until the operator says so", store.activeId())
+
+        store.setActive(second.id)
+        assertEquals(second.id, store.activeId())
+
+        // It is a file fact, not process state: a new instance sees it.
+        assertEquals(second.id, store().activeId())
+
+        // Editing an unrelated record must not move it.
+        store.upsert(passwordDraft(id = first.id))
+        assertEquals(second.id, store.activeId())
+
+        // Deleting the current one clears the selection instead of dangling.
+        store.delete(second.id)
+        assertNull(store.activeId())
+
+        store.setActive(first.id)
+        assertEquals(first.id, store.activeId())
+        store.setActive(null)
+        assertNull(store.activeId())
+    }
+
+    @Test
+    fun `an unknown current server is refused and never written`() {
+        val store = store()
+        store.upsert(passwordDraft())
+        val failure = runCatching { store.setActive("0123456789abcdef") }.exceptionOrNull()
+        assertTrue(failure is ApiException && failure.code == "TARGET_NOT_FOUND")
+        assertNull(store.activeId())
+    }
+
     @Test
     fun `the pin is round-tripped and cleared deliberately`() {
         val store = store()

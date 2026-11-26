@@ -66,12 +66,47 @@ class SshTunnelManager(
         val hostKeySha256: String?
     )
 
+    /**
+     * Where an attempt stopped (D105).
+     *
+     * The failure code is derived from the stage that threw, not from the
+     * exception class. MINA raises `SshException` — which *is* an `IOException`
+     * — for a rejected password, so mapping by type reported "network
+     * unreachable" for a wrong password and sent the operator hunting for a
+     * firewall that was never the problem.
+     */
+    enum class Stage(val wireName: String) {
+        RESOLVE("resolve"),
+        CONNECT("connect"),
+        HANDSHAKE("handshake"),
+        AUTH("auth"),
+        FORWARD("forward")
+    }
+
     sealed class Result {
         data class Connected(val fingerprint: String, val learned: Boolean) : Result()
         data class HostKeyUnverified(val fingerprint: String) : Result()
         data class HostKeyMismatch(val pinned: String, val observed: String) : Result()
-        data class Failed(val code: String, val message: String) : Result()
+        data class Failed(
+            val code: String,
+            val message: String,
+            val stage: Stage = Stage.AUTH
+        ) : Result()
+
+        /**
+         * A credential check that did not need the data plane (D106).
+         * [forwardChecked] says whether the reverse port was actually
+         * requested; with the data plane off it is `false`, never "ok".
+         */
+        data class Verified(
+            val fingerprint: String,
+            val learned: Boolean,
+            val forwardChecked: Boolean
+        ) : Result()
     }
+
+    /** What `open` is for: a live tunnel, or a one-shot credential check. */
+    private enum class Mode { FORWARD, VERIFY }
 
     private class Active(
         val target: SshTarget,
@@ -84,6 +119,8 @@ class SshTunnelManager(
     private val admission = Any()
     private val active = ConcurrentHashMap<String, Active>()
     private val connecting = ConcurrentHashMap.newKeySet<String>()
+    /** One credential check at a time per target; it opens its own session. */
+    private val verifying = ConcurrentHashMap.newKeySet<String>()
 
     @Volatile
     private var failures: Map<String, Pair<String, Long>> = emptyMap()
@@ -102,7 +139,12 @@ class SshTunnelManager(
     /** For the phone: includes the host and the user. Never leaves the device. */
     fun statusForUi(): List<Map<String, Any?>> {
         val now = clock()
-        return store.list().map { target ->
+        val activeId = store.activeId()
+        // The operator's current server is shown first, and the rest keep their
+        // saved order (D107). Sorting in the projection rather than in the store
+        // keeps the file in the order the operator created it.
+        val targets = store.list().sortedBy { if (it.id == activeId) 0 else 1 }
+        return targets.map { target ->
             val current = active[target.id]
             val failure = failures[target.id]
             linkedMapOf(
@@ -119,6 +161,7 @@ class SshTunnelManager(
                 "state" to state(target.id).wireName,
                 "sinceMs" to (current?.sinceMs ?: failure?.second ?: 0L),
                 "lastError" to failure?.first,
+                "current" to (target.id == activeId),
                 "nowMs" to now
             )
         }
@@ -129,19 +172,24 @@ class SshTunnelManager(
      * the fingerprint stay on the device; the remote bridge does not need them.
      */
     fun statusForServer(): Map<String, Any?> {
-        val tunnels = store.list().map { target ->
+        val activeId = store.activeId()
+        val saved = store.list()
+        val tunnels = saved.map { target ->
             val current = active[target.id]
             linkedMapOf<String, Any?>(
                 "id" to target.id,
                 "label" to target.label,
                 "state" to state(target.id).wireName,
                 "sinceMs" to (current?.sinceMs ?: failures[target.id]?.second ?: 0L),
-                "lastError" to failures[target.id]?.first
+                "lastError" to failures[target.id]?.first,
+                // Which VPS is the operator's current one. The id is opaque and
+                // already in this projection; no address is added (D59).
+                "current" to (target.id == activeId)
             )
         }
         val anyConnected = tunnels.any { it["state"] == State.CONNECTED.wireName }
         return linkedMapOf(
-            "configured" to store.list().isNotEmpty(),
+            "configured" to saved.isNotEmpty(),
             "connected" to anyConnected,
             "active" to active.size,
             "tunnels" to tunnels
@@ -157,15 +205,8 @@ class SshTunnelManager(
     fun connect(id: String, trustHostKey: String? = null): Result {
         val target = store.find(id)
             ?: return Result.Failed("TARGET_NOT_FOUND", "no SSH target with that id")
-        if (!target.enabled) {
-            return Result.Failed("TARGET_DISABLED", "this target is disabled")
-        }
-        if (target.auth == SshAuth.KEY && !SshKeys.isSupported()) {
-            return Result.Failed(
-                "SSH_UNAVAILABLE",
-                "this build has no Ed25519 provider; key authentication cannot be used"
-            )
-        }
+        val problem = preflight(target)
+        if (problem != null) return problem
 
         synchronized(admission) {
             if (active.containsKey(id)) {
@@ -184,46 +225,101 @@ class SshTunnelManager(
         }
 
         try {
+            // The forward needs somewhere to land, so a connect without the data
+            // plane is refused *before* a socket exists. `verify` is the call
+            // that proves the credentials without it (D106).
             val local = localTarget()
                 ?: return fail(
                     id,
                     "DATA_PLANE_NOT_RUNNING",
-                    "start the public data plane before opening a tunnel"
+                    "the public data plane is off, so there is nothing to forward to; " +
+                        "use Test connection to check the server and password"
                 )
-            val secret = store.openSecret(target)
-                ?: return fail(
-                    id,
-                    if (target.auth == SshAuth.KEY) "KEY_MISSING" else "PASSWORD_MISSING",
-                    "no usable credential is stored for this target"
-                )
-            val pairs = if (target.auth == SshAuth.KEY) {
-                SshKeys.keyPairFromPrivateText(secret)?.let { listOf(it) }
-                    ?: return fail(id, "KEY_INVALID", "the stored private key cannot be parsed")
-            } else {
-                null
-            }
-            return open(target, local, secret, pairs, trustHostKey)
+            return open(target, local, trustHostKey, Mode.FORWARD)
         } finally {
             connecting.remove(id)
         }
     }
 
+    /**
+     * Checks one saved server without changing anything that is running
+     * (D106): resolve, connect, handshake, host key and authentication are
+     * always attempted. The reverse forward is attempted only when the data
+     * plane is up, and the result says which of the two happened.
+     *
+     * It writes only what the operator asked for: a confirmed host key becomes
+     * the pin, exactly as a first connect would.
+     */
+    fun verify(id: String, trustHostKey: String? = null): Result {
+        val target = store.find(id)
+            ?: return Result.Failed("TARGET_NOT_FOUND", "no SSH target with that id")
+        val problem = preflight(target)
+        if (problem != null) return problem
+        if (!verifying.add(id)) {
+            return Result.Failed("CONNECTING", "a connection attempt is already running")
+        }
+        return try {
+            open(target, localTarget(), trustHostKey, Mode.VERIFY)
+        } finally {
+            verifying.remove(id)
+        }
+    }
+
+    /** Shared refusals that need no socket. */
+    private fun preflight(target: SshTarget): Result.Failed? {
+        if (!target.enabled) {
+            return Result.Failed("TARGET_DISABLED", "this target is disabled")
+        }
+        if (!target.isConfigured()) {
+            return Result.Failed(
+                if (target.auth == SshAuth.KEY) "KEY_MISSING" else "PASSWORD_MISSING",
+                "no usable credential is stored for this target"
+            )
+        }
+        if (target.auth == SshAuth.KEY && !SshKeys.isSupported()) {
+            return Result.Failed(
+                "SSH_UNAVAILABLE",
+                "this build has no Ed25519 provider; key authentication cannot be used"
+            )
+        }
+        return null
+    }
+
     private fun open(
         target: SshTarget,
-        local: Pair<String, Int>,
-        secret: String,
-        pairs: List<java.security.KeyPair>?,
-        trustHostKey: String?
+        local: Pair<String, Int>?,
+        trustHostKey: String?,
+        mode: Mode
     ): Result {
+        val secret = store.openSecret(target)
+            ?: return fail(
+                target.id,
+                if (target.auth == SshAuth.KEY) "KEY_MISSING" else "PASSWORD_MISSING",
+                "no usable credential is stored for this target"
+            )
+        val pairs = if (target.auth == SshAuth.KEY) {
+            SshKeys.keyPairFromPrivateText(secret)?.let { listOf(it) }
+                ?: return fail(target.id, "KEY_INVALID", "the stored private key cannot be parsed")
+        } else {
+            null
+        }
+
         val observed = AtomicReference<String?>(null)
         val mismatch = AtomicReference(false)
+        // The stage is the diagnosis (D105). It is advanced immediately before
+        // the call that can fail, so the code names what actually broke. A
+        // reference rather than a local keeps the write on the path that throws
+        // — the compiler cannot see that a Java call may unwind, and would
+        // otherwise fold the assignment away as dead.
+        val stage = AtomicReference(Stage.RESOLVE)
 
         val client = SshClient.setUpDefaultClient()
         // MINA rejects an incoming forwarded-tcpip channel when the client has no
         // forwarding filter, and an accept-all filter would let a compromised
         // server reach any port on the phone. This policy allows exactly one
-        // destination: the data plane we asked to expose (D58).
-        client.forwardingFilter = SshForwardingPolicy(local.second)
+        // destination: the data plane we asked to expose (D58). A port of -1
+        // matches nothing, which is what a verify without a data plane wants.
+        client.forwardingFilter = SshForwardingPolicy(local?.second ?: -1)
         client.serverKeyVerifier = ServerKeyVerifier { _, _, key: PublicKey ->
             val fingerprint = SshKeys.fingerprint(key)
             observed.set(fingerprint)
@@ -234,46 +330,91 @@ class SshTunnelManager(
                 trust != null -> constantTimeEquals(trust, fingerprint)
                 else -> false
             }
-            if (!accepted && pinned != null) mismatch.set(true)
+            // Only a key that was checked and did not match is a mismatch. The
+            // old form set this only for a pin, so an operator who confirmed the
+            // fingerprint on first use and then typed a wrong password was told
+            // "the host key changed" — a sentence that describes a machine
+            // substitution and is the opposite of what happened (D105).
+            if (!accepted && (pinned != null || trust != null)) mismatch.set(true)
             accepted
         }
 
         var session: ClientSession? = null
         try {
             client.start()
-            val connect = client.connect(target.username, target.host, target.port)
+            // A name that does not resolve is a typo, not a firewall, and it
+            // gets its own code. MINA folds the lookup into its connect future
+            // and wraps the cause, so the exception carries nothing this code
+            // can classify — the lookup is therefore done once, here, and its
+            // failure is reported as the form problem it is (D105). The bind
+            // path still never resolves (S5-R005); this is a dialled target the
+            // operator typed.
+            val resolved = try {
+                java.net.InetAddress.getByName(target.host)
+            } catch (dns: Throwable) {
+                runCatching { client.stop() }
+                return fail(
+                    id = target.id,
+                    code = "SSH_HOST_UNKNOWN",
+                    message = "that host name could not be resolved; " +
+                        "check the spelling or use the IP address",
+                    stage = Stage.RESOLVE
+                )
+            }
+            stage.set(Stage.CONNECT)
+            val connect = client.connect(target.username, resolved.hostAddress, target.port)
+            // The TCP connection is up before this; what can fail now is the key
+            // exchange and the host-key check, which is a different diagnosis.
+            stage.set(Stage.HANDSHAKE)
             connect.verify(CONNECT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
             val established: ClientSession = connect.session
             session = established
 
+            stage.set(Stage.AUTH)
             if (pairs != null) {
                 established.keyIdentityProvider = KeyIdentityProvider { pairs }
             } else {
                 established.addPasswordIdentity(secret)
+                // OpenSSH with PAM answers a password login as a single
+                // non-echoing keyboard-interactive prompt, which is not the
+                // `password` method at all. Without a handler the challenge is
+                // never answered and a correct password fails as "exhausted
+                // methods" (D105).
+                established.userInteraction = SshPasswordInteraction(secret)
             }
             established.auth().verify(AUTH_TIMEOUT_MS, TimeUnit.MILLISECONDS)
 
             // The only thing this session is allowed to do (D58).
             //
-            // This is a separate try because a server refusing the forward is a
-            // different problem from a network failure: the port is already in
+            // This is a separate stage because a server refusing the forward is
+            // a different problem from a network failure: the port is already in
             // use, the server forbids forwards, or the address is not allowed.
             // Reporting `SSH_FAILED` there would send the operator to look at
             // the network (D78).
-            try {
-                established.startRemotePortForwarding(
-                    SshdSocketAddress("127.0.0.1", target.remoteForwardPort),
-                    SshdSocketAddress(local.first, local.second)
-                )
-            } catch (refused: Throwable) {
-                runCatching { established.close(true) }
-                runCatching { client.stop() }
-                return fail(
-                    id = target.id,
-                    code = "SSH_FORWARD_REFUSED",
-                    message = "the server refused the remote forward port " +
-                        "${target.remoteForwardPort} (is it already in use?)"
-                )
+            // A live tunnel already holds this target's remote port, so asking
+            // for it again would be refused by our own session and reported as
+            // "the server refused the forward port" — the opposite of the truth.
+            // The forward is therefore only requested when this target is not
+            // already up, and `forwardChecked` says which happened.
+            val forwardChecked = local != null && !active.containsKey(target.id)
+            if (local != null && !active.containsKey(target.id)) {
+                stage.set(Stage.FORWARD)
+                try {
+                    established.startRemotePortForwarding(
+                        SshdSocketAddress("127.0.0.1", target.remoteForwardPort),
+                        SshdSocketAddress(local.first, local.second)
+                    )
+                } catch (refused: Throwable) {
+                    runCatching { established.close(true) }
+                    runCatching { client.stop() }
+                    return fail(
+                        id = target.id,
+                        code = "SSH_FORWARD_REFUSED",
+                        message = "the server refused the remote forward port " +
+                            "${target.remoteForwardPort} (is it already in use?)",
+                        stage = Stage.FORWARD
+                    )
+                }
             }
 
             val fingerprint = observed.get() ?: "SHA256:unavailable"
@@ -281,6 +422,23 @@ class SshTunnelManager(
             if (learned) {
                 store.pinHostKey(target.id, fingerprint)
                 audit("ssh.hostkey.learned", "target=${target.id}")
+            }
+
+            if (mode == Mode.VERIFY) {
+                // Nothing is left running: a check must not change the state the
+                // operator is looking at.
+                runCatching { established.close(false) }
+                runCatching { client.stop() }
+                // A check that has just proved the credentials is a measurement,
+                // so it clears the failure the row would otherwise keep showing:
+                // a green sentence above a red lamp is exactly the dishonesty
+                // this screen exists to avoid.
+                failures = failures - target.id
+                audit(
+                    "ssh.verify",
+                    "target=${target.id} ok=true forward=$forwardChecked"
+                )
+                return Result.Verified(fingerprint, learned, forwardChecked)
             }
 
             val current = Active(target, client, established, clock())
@@ -313,18 +471,18 @@ class SshTunnelManager(
                     audit("ssh.hostkey.unverified", "target=${target.id}")
                     return Result.HostKeyUnverified(fingerprint)
                 }
-                if (mismatch.get() || (pinned == null && trustHostKey != null)) {
-                    failures = failures + (target.id to ("HOST_KEY_MISMATCH" to clock()))
+                // The verifier is the only thing allowed to claim a mismatch:
+                // it says a key was compared and differed. Any other failure
+                // after a confirmed handshake is diagnosed by its stage.
+                if (mismatch.get()) {
+                    val code = "HOST_KEY_MISMATCH"
+                    failures = failures + (target.id to (code to clock()))
                     audit("ssh.hostkey.mismatch", "target=${target.id}")
                     return Result.HostKeyMismatch(pinned ?: trustHostKey ?: "", fingerprint)
                 }
             }
-            val code = when (failure) {
-                is java.util.concurrent.TimeoutException -> "SSH_TIMEOUT"
-                is java.io.IOException -> "SSH_UNAVAILABLE"
-                else -> "SSH_FAILED"
-            }
-            return fail(id = target.id, code = code, message = describe(failure))
+            val diagnosis = diagnose(failure, stage.get())
+            return fail(target.id, diagnosis.code, diagnosis.message, diagnosis.stage)
         }
     }
 
@@ -347,19 +505,98 @@ class SshTunnelManager(
 
     // ------------------------------------------------------------------ helpers
 
-    private fun fail(id: String, code: String, message: String): Result {
+    private fun fail(
+        id: String,
+        code: String,
+        message: String,
+        stage: Stage = Stage.AUTH
+    ): Result {
         failures = failures + (id to (code to clock()))
-        audit("ssh.failed", "target=$id code=$code")
-        logger("ssh failed: target=$id code=$code")
-        return Result.Failed(code, message)
+        audit("ssh.failed", "target=$id code=$code stage=${stage.wireName}")
+        logger("ssh failed: target=$id code=$code stage=${stage.wireName}")
+        return Result.Failed(code, message, stage)
     }
 
     /**
-     * The exception class, never its message: a driver message can carry the
-     * host, a user name or a key fragment.
+     * A diagnosis: a stable code, a sentence an operator can act on, and the
+     * stage it really belongs to (a refused TCP connect surfaces from MINA
+     * during session verification, so the raw stage would say "handshake").
      */
-    private fun describe(failure: Throwable): String =
-        "the SSH session failed (${failure.javaClass.simpleName})"
+    private data class Diagnosis(val code: String, val message: String, val stage: Stage)
+
+    /**
+     * Turns a failure into a code by the stage that threw (D105).
+     *
+     * The stages are advanced immediately before each call, so this never has
+     * to guess from an exception class — and the driver's own message is never
+     * used, because it can carry the host, the user name or a key fragment.
+     */
+    private fun diagnose(failure: Throwable, stage: Stage): Diagnosis = when (stage) {
+        Stage.RESOLVE -> Diagnosis(
+            "SSH_HOST_UNKNOWN",
+            "that host name could not be resolved; check the spelling or use the IP address",
+            Stage.RESOLVE
+        )
+        // MINA reports a refused TCP connection when the connect future is
+        // verified, which is also where the handshake happens — so the stage
+        // alone cannot tell them apart. The cause chain can: a refused port or a
+        // dead host carries `ConnectException`/`NoRouteToHostException` all the
+        // way down, and a handshake failure never does.
+        Stage.CONNECT, Stage.HANDSHAKE -> when {
+            hasCause<java.net.UnknownHostException>(failure) -> Diagnosis(
+                "SSH_HOST_UNKNOWN",
+                "that host name could not be resolved; " +
+                    "check the spelling or use the IP address",
+                Stage.RESOLVE
+            )
+            hasCause<java.net.NoRouteToHostException>(failure) ||
+                hasCause<java.net.ConnectException>(failure) -> Diagnosis(
+                "SSH_HOST_UNREACHABLE",
+                "nothing accepted a connection on that address and port; " +
+                    "is sshd running, and is the port open in the firewall?",
+                Stage.CONNECT
+            )
+            hasCause<java.net.SocketTimeoutException>(failure) ||
+                hasCause<java.util.concurrent.TimeoutException>(failure) -> Diagnosis(
+                "SSH_TIMEOUT",
+                "no answer in time; a firewall or the wrong port is the usual cause",
+                Stage.CONNECT
+            )
+            stage == Stage.CONNECT -> Diagnosis(
+                "SSH_HOST_UNREACHABLE",
+                "the connection could not be established; check the address and port",
+                Stage.CONNECT
+            )
+            else -> Diagnosis(
+                "SSH_HANDSHAKE_FAILED",
+                "the host answered but the SSH handshake did not complete " +
+                    "(a proxy, a blocked port or a very old server)",
+                Stage.HANDSHAKE
+            )
+        }
+        Stage.AUTH -> Diagnosis(
+            "SSH_AUTH_FAILED",
+            "the server rejected the username or the password",
+            Stage.AUTH
+        )
+        Stage.FORWARD -> Diagnosis(
+            "SSH_FORWARD_REFUSED",
+            "the server refused the remote forward port",
+            Stage.FORWARD
+        )
+    }
+
+    /** True when [type] appears anywhere in the cause chain (bounded walk). */
+    private inline fun <reified T : Throwable> hasCause(failure: Throwable): Boolean {
+        var current: Throwable? = failure
+        var depth = 0
+        while (current != null && depth < 8) {
+            if (current is T) return true
+            current = current.cause
+            depth++
+        }
+        return false
+    }
 
     private fun constantTimeEquals(left: String, right: String): Boolean =
         MessageDigest.isEqual(

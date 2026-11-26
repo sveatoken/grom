@@ -80,14 +80,18 @@ data class SshTarget(
          * session and a MINA transport. Saved targets are deliberately not
          * capped (D64) — the store's own size limit is the only bound, and
          * exceeding it is reported instead of silently dropping records.
+         *
+         * Four, not two (D107): an operator with several VPS hosts should not
+         * have to forget one to use another, and four sessions is still a
+         * bounded, stated cost rather than an open-ended one.
          */
-        const val MAX_ACTIVE: Int = 2
+        const val MAX_ACTIVE: Int = 4
 
         /**
          * Above this many saved servers the UI shows an advisory. It is not a
          * refusal: extra servers simply stay idle, and the reason is stated.
          */
-        const val ADVISORY_TARGETS: Int = 2
+        const val ADVISORY_TARGETS: Int = 4
 
         val ID_PATTERN: Regex = Regex("^[0-9a-f]{16}$")
         val LABEL_MAX: Int = 64
@@ -199,6 +203,18 @@ object SshTargetRules {
                     return SshProblem(
                         "BAD_PASSWORD",
                         "password must be 1..$MAX_PASSWORD_CHARS characters"
+                    )
+                }
+                // A pasted password usually arrives with a trailing newline.
+                // Accepting it stores a secret that can never authenticate, and
+                // the server answers with a plain "rejected" that looks exactly
+                // like a wrong password (D105). The password itself is never
+                // trimmed or echoed — it is refused with the reason.
+                if (supplied != null && supplied.any { it.isISOControl() }) {
+                    return SshProblem(
+                        "BAD_PASSWORD",
+                        "the password contains a control character " +
+                            "(a pasted line break?); remove it and try again"
                     )
                 }
             }

@@ -38,6 +38,35 @@ class SshTargetStore(
     @Synchronized
     fun find(id: String): SshTarget? = load().firstOrNull { it.id == id }
 
+    /**
+     * The operator's current server (D107). It is one id for the whole file,
+     * not a flag on each record: two records both claiming to be "active" is a
+     * state the store must not be able to reach.
+     *
+     * A dangling id (the record was deleted elsewhere, or the file was edited
+     * by hand) is reported as no active server rather than repaired silently.
+     */
+    @Synchronized
+    fun activeId(): String? {
+        val (records, id) = loadDocument()
+        val chosen = id ?: return null
+        return chosen.takeIf { candidate -> records.any { it.id == candidate } }
+    }
+
+    /**
+     * Marks one saved server as the current one. An empty [id] clears the
+     * selection; an unknown id is refused instead of written.
+     */
+    @Synchronized
+    fun setActive(id: String?) {
+        val records = load()
+        val chosen = id?.trim()?.takeIf { it.isNotEmpty() }
+        if (chosen != null && records.none { it.id == chosen }) {
+            throw ApiException(404, "TARGET_NOT_FOUND", "no SSH target with that id")
+        }
+        save(records, chosen)
+    }
+
     /** The secret to authenticate with, decrypted for the duration of a connect. */
     @Synchronized
     fun openSecret(target: SshTarget): String? = when (target.auth) {
@@ -184,21 +213,24 @@ class SshTargetStore(
 
     // ------------------------------------------------------------------ storage
 
-    private fun load(): List<SshTarget> {
+    private fun load(): List<SshTarget> = loadDocument().first
+
+    /** The parsed file: the targets in file order and the active id, if any. */
+    private fun loadDocument(): Pair<List<SshTarget>, String?> {
         lastError = null
-        if (!file.isFile) return emptyList()
+        if (!file.isFile) return emptyList<SshTarget>() to null
         return try {
             val text = file.readText()
             if (text.length > maxFileBytes) {
                 lastError = "ssh targets file is larger than $MAX_FILE_BYTES bytes"
-                return emptyList()
+                return emptyList<SshTarget>() to null
             }
             val root = JsonParser.parseObjectOrNull(text)
             if (root == null) {
                 lastError = "ssh targets file is not a JSON object"
-                return emptyList()
+                return emptyList<SshTarget>() to null
             }
-            val raw = root["targets"] as? List<*> ?: return emptyList()
+            val raw = root["targets"] as? List<*> ?: return emptyList<SshTarget>() to null
             val out = ArrayList<SshTarget>(raw.size)
             for (item in raw) {
                 val map = item as? Map<*, *> ?: continue
@@ -210,18 +242,22 @@ class SshTargetStore(
                 }
                 out.add(target)
             }
-            out
+            out to (root["activeId"] as? String)
         } catch (failure: Exception) {
             lastError = "ssh targets unreadable: ${failure.javaClass.simpleName}"
-            emptyList()
+            emptyList<SshTarget>() to null
         }
     }
 
-    private fun save(records: List<SshTarget>) {
+    private fun save(records: List<SshTarget>, activeId: String? = this.activeId()) {
         file.parentFile?.mkdirs()
+        // A record can be deleted while a stale active id is still on disk; the
+        // saved document never names a server that is not in the list.
+        val chosen = activeId?.takeIf { id -> records.any { it.id == id } }
         val text = Json.encode(
             mapOf(
-                "version" to 1,
+                "version" to 2,
+                "activeId" to chosen,
                 "targets" to records.map(::toJson)
             )
         )

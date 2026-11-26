@@ -3,6 +3,7 @@ package app.grom.server.ssh
 
 import app.grom.server.store.SecretBox
 import org.apache.sshd.server.SshServer
+import org.apache.sshd.server.auth.keyboard.UserAuthKeyboardInteractiveFactory
 import org.apache.sshd.server.auth.password.PasswordAuthenticator
 import org.apache.sshd.server.forward.AcceptAllForwardingFilter
 import org.apache.sshd.server.keyprovider.SimpleGeneratorHostKeyProvider
@@ -252,10 +253,10 @@ class SshTunnelManagerTest {
     }
 
     @Test(timeout = 120_000)
-    fun `the active tunnel cap refuses a third live tunnel`() {
+    fun `the active tunnel cap refuses one tunnel beyond the limit`() {
         val store = newStore()
         val manager = manager(store)
-        val ids = (1..3).map { index ->
+        val ids = (1..(SshTarget.MAX_ACTIVE + 1)).map { index ->
             store.upsert(
                 SshTargetDraft(
                     label = "cap $index",
@@ -273,14 +274,13 @@ class SshTunnelManagerTest {
             val result = manager.connect(id, probe.fingerprint)
             assertTrue("expected connected, got $result", result is SshTunnelManager.Result.Connected)
         }
-        up(ids[0])
-        up(ids[1])
-        assertEquals(2, manager.activeCount())
+        for (index in 0 until SshTarget.MAX_ACTIVE) up(ids[index])
+        assertEquals(SshTarget.MAX_ACTIVE, manager.activeCount())
 
-        val third = manager.connect(ids[2], null)
-        assertTrue(third is SshTunnelManager.Result.Failed)
-        assertEquals("TOO_MANY_TUNNELS", (third as SshTunnelManager.Result.Failed).code)
-        assertEquals(2, manager.activeCount())
+        val extra = manager.connect(ids[SshTarget.MAX_ACTIVE], null)
+        assertTrue(extra is SshTunnelManager.Result.Failed)
+        assertEquals("TOO_MANY_TUNNELS", (extra as SshTunnelManager.Result.Failed).code)
+        assertEquals(SshTarget.MAX_ACTIVE, manager.activeCount())
 
         manager.stopAll()
         assertEquals(0, manager.activeCount())
@@ -322,8 +322,288 @@ class SshTunnelManagerTest {
             occupied.close()
         }
     }
-}
 
+    /**
+     * A rejected password is `SSH_AUTH_FAILED` (D105). MINA raises an
+     * `SshException`, which *is* an `IOException`, so the old mapping called
+     * this "network unreachable" and sent the operator to look at a firewall.
+     */
+    @Test(timeout = 120_000)
+    fun `a wrong password is an auth failure not an unreachable host`() {
+        val store = newStore()
+        val saved = store.upsert(
+            SshTargetDraft(
+                label = "wrong password",
+                host = "127.0.0.1",
+                port = sshPort,
+                username = "grom",
+                auth = SshAuth.PASSWORD,
+                password = "not-the-password",
+                remoteForwardPort = freePort()
+            )
+        )
+        val manager = manager(store)
+        val probe = manager.connect(saved.id, null) as SshTunnelManager.Result.HostKeyUnverified
+        val result = manager.connect(saved.id, probe.fingerprint)
+
+        assertTrue("expected a failure, got $result", result is SshTunnelManager.Result.Failed)
+        val failed = result as SshTunnelManager.Result.Failed
+        assertEquals("SSH_AUTH_FAILED", failed.code)
+        assertEquals(SshTunnelManager.Stage.AUTH, failed.stage)
+        assertFalse(manager.isActive(saved.id))
+    }
+
+    /** A port with nothing listening is a different sentence from a bad password. */
+    @Test(timeout = 120_000)
+    fun `a closed port is an unreachable host`() {
+        val closed = freePort()
+        val store = newStore()
+        val saved = store.upsert(
+            SshTargetDraft(
+                label = "closed port",
+                host = "127.0.0.1",
+                port = closed,
+                username = "grom",
+                auth = SshAuth.PASSWORD,
+                password = "s3cret-pass",
+                remoteForwardPort = freePort()
+            )
+        )
+        val manager = manager(store)
+        val result = manager.connect(saved.id, null)
+
+        assertTrue("expected a failure, got $result", result is SshTunnelManager.Result.Failed)
+        val failed = result as SshTunnelManager.Result.Failed
+        assertEquals("SSH_HOST_UNREACHABLE", failed.code)
+        assertEquals(SshTunnelManager.Stage.CONNECT, failed.stage)
+    }
+
+    /** A name that does not resolve is reported as a name problem. */
+    @Test(timeout = 120_000)
+    fun `an unresolvable name is its own diagnosis`() {
+        val store = newStore()
+        val saved = store.upsert(
+            SshTargetDraft(
+                label = "no such host",
+                host = "grom-does-not-resolve.invalid",
+                port = 22,
+                username = "grom",
+                auth = SshAuth.PASSWORD,
+                password = "s3cret-pass",
+                remoteForwardPort = freePort()
+            )
+        )
+        val manager = manager(store)
+        val result = manager.connect(saved.id, null)
+
+        assertTrue("expected a failure, got $result", result is SshTunnelManager.Result.Failed)
+        val failed = result as SshTunnelManager.Result.Failed
+        assertEquals("SSH_HOST_UNKNOWN", failed.code)
+        assertEquals(SshTunnelManager.Stage.RESOLVE, failed.stage)
+    }
+
+    /**
+     * The check the operator actually needs when a public address and a
+     * password do not work: prove name, port, host key and password without a
+     * data plane, and say plainly that the forward was not tested (D106).
+     */
+    @Test(timeout = 120_000)
+    fun `verify proves the credentials with the data plane off`() {
+        val store = newStore()
+        val saved = store.upsert(
+            SshTargetDraft(
+                label = "vps",
+                host = "127.0.0.1",
+                port = sshPort,
+                username = "grom",
+                auth = SshAuth.PASSWORD,
+                password = "s3cret-pass",
+                remoteForwardPort = freePort()
+            )
+        )
+        val offline = SshTunnelManager(
+            store = store,
+            audit = { _, _ -> },
+            logger = { _ -> },
+            localTarget = { null }
+        )
+
+        // First use still asks the operator to confirm the fingerprint.
+        val first = offline.verify(saved.id, null)
+        assertTrue(first is SshTunnelManager.Result.HostKeyUnverified)
+        val fingerprint = (first as SshTunnelManager.Result.HostKeyUnverified).fingerprint
+
+        val verified = offline.verify(saved.id, fingerprint)
+        assertTrue("expected verified, got $verified", verified is SshTunnelManager.Result.Verified)
+        val ok = verified as SshTunnelManager.Result.Verified
+        assertFalse("the forward cannot be claimed without a data plane", ok.forwardChecked)
+        assertEquals(fingerprint, ok.fingerprint)
+        assertTrue(ok.learned)
+
+        // A check leaves nothing running and opens no tunnel.
+        assertEquals(SshTunnelManager.State.DISCONNECTED, offline.state(saved.id))
+        assertEquals(0, offline.activeCount())
+        assertEquals(fingerprint, store.find(saved.id)!!.hostKeySha256)
+
+        // A check that failed is a measurement too, so the row must not stay red
+        // after a later check proves the same credentials work.
+        val wrongOnce = newStore()
+        val typo = wrongOnce.upsert(
+            SshTargetDraft(
+                label = "vps",
+                host = "127.0.0.1",
+                port = sshPort,
+                username = "grom",
+                auth = SshAuth.PASSWORD,
+                password = "nope",
+                remoteForwardPort = freePort()
+            )
+        )
+        val recovered = SshTunnelManager(
+            store = wrongOnce,
+            audit = { _, _ -> },
+            logger = { _ -> },
+            localTarget = { null }
+        )
+        val failedFirst = recovered.verify(typo.id, fingerprint)
+        assertEquals(
+            "SSH_AUTH_FAILED",
+            (failedFirst as SshTunnelManager.Result.Failed).code
+        )
+        assertEquals(SshTunnelManager.State.FAILED, recovered.state(typo.id))
+
+        // The operator fixes the password and checks again.
+        wrongOnce.upsert(
+            SshTargetDraft(
+                id = typo.id,
+                label = "vps",
+                host = "127.0.0.1",
+                port = sshPort,
+                username = "grom",
+                auth = SshAuth.PASSWORD,
+                password = "s3cret-pass",
+                remoteForwardPort = typo.remoteForwardPort
+            )
+        )
+        assertTrue(
+            recovered.verify(typo.id, fingerprint) is SshTunnelManager.Result.Verified
+        )
+        assertEquals(SshTunnelManager.State.DISCONNECTED, recovered.state(typo.id))
+
+        // The same check now reports the wrong password as such.
+        val wrong = newStore()
+        val bad = wrong.upsert(
+            SshTargetDraft(
+                label = "vps",
+                host = "127.0.0.1",
+                port = sshPort,
+                username = "grom",
+                auth = SshAuth.PASSWORD,
+                password = "nope",
+                remoteForwardPort = freePort()
+            )
+        )
+        val mismatch = SshTunnelManager(
+            store = wrong,
+            audit = { _, _ -> },
+            logger = { _ -> },
+            localTarget = { null }
+        ).verify(bad.id, fingerprint)
+        assertEquals(
+            "SSH_AUTH_FAILED",
+            (mismatch as SshTunnelManager.Result.Failed).code
+        )
+    }
+
+    /** With a data plane the same check reports the forward as tested. */
+    @Test(timeout = 120_000)
+    fun `verify reports the forward when the data plane is up`() {
+        val store = newStore()
+        val saved = store.upsert(
+            SshTargetDraft(
+                label = "vps",
+                host = "127.0.0.1",
+                port = sshPort,
+                username = "grom",
+                auth = SshAuth.PASSWORD,
+                password = "s3cret-pass",
+                remoteForwardPort = freePort()
+            )
+        )
+        val manager = manager(store)
+        val probe = manager.verify(saved.id, null) as SshTunnelManager.Result.HostKeyUnverified
+        val verified = manager.verify(saved.id, probe.fingerprint)
+
+        assertTrue("expected verified, got $verified", verified is SshTunnelManager.Result.Verified)
+        assertTrue((verified as SshTunnelManager.Result.Verified).forwardChecked)
+        // And it is still not a tunnel: the operator's state did not change.
+        assertEquals(0, manager.activeCount())
+        assertEquals(SshTunnelManager.State.DISCONNECTED, manager.state(saved.id))
+    }
+
+    /**
+     * OpenSSH with PAM accepts a password login through keyboard-interactive.
+     * Without a handler the correct password fails as "exhausted methods",
+     * which is indistinguishable from a wrong one (D105).
+     */
+    @Test(timeout = 120_000)
+    fun `a keyboard interactive only server accepts the stored password`() {
+        val kbd = SshServer.setUpDefaultServer().apply {
+            host = "127.0.0.1"
+            port = 0
+            keyPairProvider = SimpleGeneratorHostKeyProvider(
+                File(temp.root, "kbd-hostkey.ser").toPath()
+            )
+            // Only the interactive method, like an sshd that logs in through PAM.
+            userAuthFactories = listOf(UserAuthKeyboardInteractiveFactory.INSTANCE)
+            keyboardInteractiveAuthenticator =
+                object : org.apache.sshd.server.auth.keyboard.KeyboardInteractiveAuthenticator {
+                    override fun generateChallenge(
+                        session: org.apache.sshd.server.session.ServerSession?,
+                        username: String?,
+                        lang: String?,
+                        subMethods: String?
+                    ): org.apache.sshd.server.auth.keyboard.InteractiveChallenge =
+                        org.apache.sshd.server.auth.keyboard.InteractiveChallenge().apply {
+                            interactionName = "password"
+                            addPrompt("Password: ", false)
+                        }
+
+                    override fun authenticate(
+                        session: org.apache.sshd.server.session.ServerSession?,
+                        username: String?,
+                        responses: List<String>?
+                    ): Boolean = username == "grom" && responses?.singleOrNull() == "s3cret-pass"
+                }
+            forwardingFilter = AcceptAllForwardingFilter.INSTANCE
+        }
+        kbd.start()
+        try {
+            val store = newStore()
+            val saved = store.upsert(
+                SshTargetDraft(
+                    label = "pam vps",
+                    host = "127.0.0.1",
+                    port = kbd.port,
+                    username = "grom",
+                    auth = SshAuth.PASSWORD,
+                    password = "s3cret-pass",
+                    remoteForwardPort = freePort()
+                )
+            )
+            val manager = manager(store)
+            val probe = manager.connect(saved.id, null) as SshTunnelManager.Result.HostKeyUnverified
+            val result = manager.connect(saved.id, probe.fingerprint)
+            assertTrue(
+                "the stored password must answer the interactive prompt, got $result",
+                result is SshTunnelManager.Result.Connected
+            )
+            manager.disconnect(saved.id)
+        } finally {
+            runCatching { kbd.stop(true) }
+        }
+    }
+}
 class SshForwardingPolicyTest {
 
     private val policy = SshForwardingPolicy(localPort = 47002)

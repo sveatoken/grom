@@ -784,6 +784,9 @@ class ServerRuntime(
                 "maxActive" to SshTarget.MAX_ACTIVE,
                 "advisoryTargets" to SshTarget.ADVISORY_TARGETS,
                 "activeCount" to active,
+                // The operator's current server, so the UI can mark it without
+                // guessing from order (D107).
+                "currentId" to sshStore.activeId(),
                 // The advisory is derived from what is saved and connected, and
                 // a saved server is never reported as running.
                 "advisory" to when {
@@ -859,14 +862,44 @@ class ServerRuntime(
     }
 
     /** Blocking network work; callers must not run this on the main thread. */
-    fun sshConnectJson(id: String, trustHostKey: String?): String {
-        val result = sshTunnels.connect(id, trustHostKey)
+    fun sshConnectJson(id: String, trustHostKey: String?): String =
+        sshResultJson(sshTunnels.connect(id, trustHostKey))
+
+    /**
+     * Checks one saved server without opening a tunnel (D106). It reports the
+     * stage that failed, so "wrong password" no longer looks like "network
+     * unreachable", and it works with the data plane off.
+     *
+     * Blocking network work; callers must not run this on the main thread.
+     */
+    fun sshVerifyJson(id: String, trustHostKey: String?): String =
+        sshResultJson(sshTunnels.verify(id, trustHostKey))
+
+    /** Marks the operator's current server, or clears it with an empty [id]. */
+    fun sshSetActiveJson(id: String?): String {
+        val chosen = id?.trim()?.takeIf { it.isNotEmpty() }
+        sshStore.setActive(chosen)
+        audited("ssh.active", "id=${chosen ?: "-"}")
+        return Json.encode(mapOf("ok" to true, "currentId" to sshStore.activeId()))
+    }
+
+    private fun sshResultJson(result: SshTunnelManager.Result): String {
         val body: Map<String, Any?> = when (result) {
             is SshTunnelManager.Result.Connected -> mapOf(
                 "ok" to true,
                 "state" to "connected",
                 "fingerprint" to result.fingerprint,
                 "learned" to result.learned
+            )
+            is SshTunnelManager.Result.Verified -> mapOf(
+                "ok" to true,
+                "state" to "verified",
+                "fingerprint" to result.fingerprint,
+                "learned" to result.learned,
+                // False means the credentials are proven but the reverse port
+                // was not attempted because the data plane is off. It is never
+                // reported as checked.
+                "forwardChecked" to result.forwardChecked
             )
             is SshTunnelManager.Result.HostKeyUnverified -> mapOf(
                 "ok" to false,
@@ -885,7 +918,10 @@ class ServerRuntime(
                 "ok" to false,
                 "state" to "failed",
                 "code" to result.code,
-                "message" to result.message
+                "message" to result.message,
+                // Which stage broke: resolve, connect, handshake, auth or
+                // forward. The UI turns this into a sentence (D105).
+                "stage" to result.stage.wireName
             )
         }
         return Json.encode(body)
