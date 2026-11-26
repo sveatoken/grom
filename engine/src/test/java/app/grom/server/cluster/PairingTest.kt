@@ -319,4 +319,60 @@ class PairingTest {
         }.exceptionOrNull()
         assertEquals("BAD_SCOPE", (extra as app.grom.server.http.ApiException).code)
     }
+
+    @Test
+    fun `a hello cannot ask for a local-client scope`() {
+        val identity = identityStore()
+        val endpoint = endpoint(identity, peers())
+        val code = endpoint.start()["code"] as String
+        val self = identity.loadOrCreate("Phone A")
+        val seedB = Ed25519.generatePrivateSeed()
+        val publicB = Ed25519.derivePublicKey(seedB)
+        val nodeB = Ed25519.keyId(publicB)
+        val hash = PairingProtocol.computeCodeHash(code, nodeB)
+        val answer = endpoint.hello(
+            linkedMapOf(
+                "nodeId" to nodeB,
+                "publicKey" to b64(publicB),
+                "label" to "Phone B",
+                "port" to 47002,
+                "codeHash" to hash,
+                // `mesh.call` is a grant this device gives its own clients, not
+                // something another server can hold (D104).
+                "scopes" to listOf("services.read", "mesh.call"),
+                "signature" to b64(
+                    Ed25519.sign(
+                        seedB,
+                        PairingProtocol.helloString(self.nodeId, nodeB, hash).toByteArray()
+                    )
+                )
+            ),
+            "127.0.0.1:5555"
+        )
+        assertEquals(400, answer.status)
+        val error = answer.payload["error"] as Map<*, *>
+        assertEquals("BAD_SCOPE", error["code"])
+        assertTrue(endpoint.pendingDocument().isEmpty())
+
+        // The rest of the peer-grantable set is accepted, so the mesh can ask
+        // for the two service scopes it actually needs.
+        val accepted = endpoint.hello(
+            linkedMapOf(
+                "nodeId" to nodeB,
+                "publicKey" to b64(publicB),
+                "label" to "Phone B",
+                "port" to 47002,
+                "codeHash" to hash,
+                "scopes" to listOf("status.read", "services.read", "services.call"),
+                "signature" to b64(
+                    Ed25519.sign(
+                        seedB,
+                        PairingProtocol.helloString(self.nodeId, nodeB, hash).toByteArray()
+                    )
+                )
+            ),
+            "127.0.0.1:5555"
+        )
+        assertEquals(200, accepted.status)
+    }
 }

@@ -162,6 +162,44 @@ class PeerGrantTest {
     }
 
     @Test
+    fun `granting scopes to an already paired server keeps its endpoint`() {
+        val (fleet, store, _) = service()
+        val (publicKey, nodeId) = readerKey()
+        val paired = PeerRecord(
+            nodeId = nodeId,
+            publicKey = publicKey,
+            label = "Phone B",
+            address = "http://192.168.1.20:47002",
+            grantedByMe = setOf(PeerScope.STATUS_READ),
+            grantedByPeer = setOf(PeerScope.STATUS_READ, PeerScope.CONFIG_READ),
+            pairedAtMs = 42L
+        )
+        store.add(paired)
+
+        fleet.grantJson(
+            """{"publicKey":"$publicKey","label":"Phone B","scopes":["status.read","services.read","services.call"]}"""
+        )
+
+        val updated = store.find(nodeId)
+        assertNotNull(updated)
+        // The server network needs this: a grant that forgot the address would
+        // turn a paired server into an inbound-only one that can never be
+        // called again, while the screen still showed it as paired (D104).
+        assertEquals("http://192.168.1.20:47002", updated?.address)
+        assertFalse(updated?.isInboundOnly() == true)
+        assertEquals(
+            setOf(PeerScope.STATUS_READ, PeerScope.SERVICES_READ, PeerScope.SERVICES_CALL),
+            updated?.grantedByMe
+        )
+        // What the other device granted is not this device's to rewrite.
+        assertEquals(
+            setOf(PeerScope.STATUS_READ, PeerScope.CONFIG_READ),
+            updated?.grantedByPeer
+        )
+        assertEquals(42L, updated?.pairedAtMs)
+    }
+
+    @Test
     fun `a re-grant replaces the previous scopes`() {
         val (fleet, store, _) = service()
         val (publicKey, nodeId) = readerKey()

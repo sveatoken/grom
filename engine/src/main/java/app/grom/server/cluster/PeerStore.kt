@@ -59,12 +59,18 @@ class PeerStore(
     }
 
     /**
-     * Trusts a key that only calls in (D77): no handshake and no return address.
+     * Trusts a key (D77): a hub or a server this device has already paired with.
      *
-     * This is how a hub on the operator's VPS is admitted. The key id is derived
-     * from the key, never typed, and the caller must still choose at least one
-     * scope — there is no "trust everything" path. The record it creates has an
-     * empty address, so [app.grom.server.cluster.PeerClient] can never dial it.
+     * The key id is derived from the key, never typed, and the caller must still
+     * choose at least one scope — there is no "trust everything" path.
+     *
+     * A key that is **already paired** keeps its record: the endpoint, what the
+     * other side granted and when it was paired all survive, and only
+     * [PeerRecord.grantedByMe] is replaced (D104). Replacing the whole record
+     * would turn a working pairing into an inbound-only grant and the server
+     * could never be dialled again — while the screen still listed it as
+     * paired. A key that is new creates an inbound-only record with an empty
+     * address, so [app.grom.server.cluster.PeerClient] can never dial it.
      */
     @Synchronized
     fun grant(publicKey: String, label: String, scopes: Set<PeerScope>): PeerRecord {
@@ -90,7 +96,16 @@ class PeerStore(
             error = null
         ) ?: throw ApiException(400, "BAD_PUBLIC_KEY", "the public key could not be used")
         val records = load().toMutableList()
-        records.removeAll { it.nodeId == record.nodeId }
+        val index = records.indexOfFirst { it.nodeId == record.nodeId }
+        if (index >= 0) {
+            val merged = records[index].copy(
+                label = record.label,
+                grantedByMe = scopes
+            )
+            records[index] = merged
+            save(records)
+            return merged
+        }
         records.add(record)
         save(records)
         return record
@@ -124,6 +139,33 @@ class PeerStore(
             lastProbeOk = ok,
             lastError = error
         )
+        records[index] = updated
+        save(records)
+        return updated
+    }
+
+    /**
+     * Replaces the services this peer may use here (D101).
+     *
+     * An empty set is the compatibility default — every service its scopes
+     * already allow — so an operator can return to it. Unknown ids are refused
+     * rather than stored: a typo must not quietly open nothing (or, worse, be
+     * treated as a wildcard by a future reader).
+     */
+    @Synchronized
+    fun setServices(nodeId: String, services: Set<String>): PeerRecord {
+        if (services.size > NodeIdentityRules.MAX_SHARED_SERVICES) {
+            throw ApiException(400, "BAD_SERVICE_LIST", "too many services")
+        }
+        for (id in services) {
+            if (!NodeIdentityRules.SERVICE_ID_PATTERN.matches(id)) {
+                throw ApiException(400, "BAD_SERVICE_LIST", "not a service id: $id")
+            }
+        }
+        val records = load().toMutableList()
+        val index = records.indexOfFirst { it.nodeId == nodeId }
+        if (index < 0) throw ApiException(404, "PEER_NOT_FOUND", "no paired device with that id")
+        val updated = records[index].copy(services = services)
         records[index] = updated
         save(records)
         return updated

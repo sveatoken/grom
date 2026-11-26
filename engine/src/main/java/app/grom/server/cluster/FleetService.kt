@@ -131,6 +131,7 @@ class FleetService(
         if (!PairingProtocol.CODE_PATTERN.matches(code)) {
             throw ApiException(400, "BAD_PAIR_CODE", "the pairing code has 8 characters")
         }
+        val requestedScopes = requestedPairingScopes(raw)
 
         val self = identity()
         val seed = identityStore.seed()
@@ -157,7 +158,7 @@ class FleetService(
                 "label" to self.label,
                 "port" to localPort(),
                 "codeHash" to codeHash,
-                "scopes" to listOf(PeerScope.STATUS_READ.wireName, PeerScope.CONFIG_READ.wireName),
+                "scopes" to PeerScope.wireNames(requestedScopes),
                 "signature" to Base64.getEncoder().encodeToString(signature)
             )
         )
@@ -185,6 +186,35 @@ class FleetService(
             }
         }
         throw ApiException(504, "PAIR_TIMEOUT", "the other operator did not decide in time")
+    }
+
+    /**
+     * The scopes this device asks the other one to grant (D104).
+     *
+     * Absent keeps the pre-mesh default of `status.read` and `config.read`, so
+     * `Devices` behaves exactly as before. A present list must be a non-empty
+     * subset of [PeerScope.PEER_GRANTABLE]: a local-client scope (`mesh.read`,
+     * `mesh.call`) is never handed to another device, and an unknown name is a
+     * typo rather than something to ignore.
+     */
+    private fun requestedPairingScopes(raw: Map<*, *>): Set<PeerScope> {
+        if (!raw.containsKey("scopes")) {
+            return setOf(PeerScope.STATUS_READ, PeerScope.CONFIG_READ)
+        }
+        val parsed = PeerScope.fromJson(raw["scopes"])
+            ?: throw ApiException(400, "BAD_SCOPE", "scopes must be a list of known names")
+        if (parsed.isEmpty()) {
+            throw ApiException(400, "BAD_SCOPE", "ask for at least one scope")
+        }
+        val refused = parsed.filterNot { it in PeerScope.PEER_GRANTABLE }
+        if (refused.isNotEmpty()) {
+            throw ApiException(
+                400,
+                "BAD_SCOPE",
+                "a pairing cannot grant ${refused.sortedBy { it.wireName }.joinToString(",") { it.wireName }}"
+            )
+        }
+        return parsed
     }
 
     /**
@@ -385,8 +415,43 @@ class FleetService(
      */
     fun principalOf(keyId: String): SuperAuth.Principal {
         val peer = store.find(keyId) ?: return SuperAuth.Principal.Operator
-        return SuperAuth.Principal.Peer(peer.nodeId, peer.grantedByMe)
+        // The per-peer service allow-list is read live with the record, so an
+        // operator's change applies to the next request without a restart
+        // (D54, D101).
+        return SuperAuth.Principal.Peer(peer.nodeId, peer.grantedByMe, peer.services)
     }
+
+    /**
+     * Changes which services a paired server may use here (D101).
+     *
+     * The ids are checked against the services this device actually serves, so
+     * the operator cannot grant a name that does not exist; an empty list means
+     * "everything its scopes already allow".
+     */
+    fun setSharesJson(nodeId: String, services: List<String>): String {
+        val known = knownServiceIds()
+        val cleaned = LinkedHashSet<String>(services.size)
+        for (raw in services) {
+            val id = raw.trim()
+            if (known.isNotEmpty() && id !in known) {
+                throw ApiException(400, "UNKNOWN_SERVICE", "no service with that id: $id")
+            }
+            cleaned.add(id)
+        }
+        val updated = store.setServices(nodeId, cleaned)
+        audit("peer.shares", "peer=${updated.nodeId} services=${updated.services.sorted()}")
+        return Json.encode(
+            linkedMapOf(
+                "ok" to true,
+                "peer" to updated.toJson(clock(), includeAddress = true)
+            )
+        )
+    }
+
+    /** The service ids this runtime serves; injected so the store stays pure. */
+    var serviceIds: () -> Set<String> = { emptySet() }
+
+    private fun knownServiceIds(): Set<String> = runCatching { serviceIds() }.getOrDefault(emptySet())
 
     fun onDataPlaneStopped() {
         pairing.close()

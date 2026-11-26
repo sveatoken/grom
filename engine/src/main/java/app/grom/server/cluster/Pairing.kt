@@ -377,6 +377,13 @@ class PairingEndpoint(
             if (scopes.isEmpty()) {
                 return badRequest("SCOPE_REQUIRED", "the peer requested no scope")
             }
+            // D104: only peer grants cross a pairing. A request naming a
+            // local-client scope is refused here as well as on the joining
+            // side, so a hand-written hello cannot put a permission the
+            // operator cannot interpret in front of the approval screen.
+            if (scopes.any { it !in PeerScope.PEER_GRANTABLE }) {
+                return badRequest("BAD_SCOPE", "a pairing cannot grant a local-client scope")
+            }
 
             // Prove the caller holds the key first: only a device that can sign
             // gets to spend a code attempt.
