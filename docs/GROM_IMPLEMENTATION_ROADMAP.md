@@ -23,6 +23,7 @@ Task ids (`T-nn`) match §U of the master plan.
 | **1K — "2 in 1" without complications: versioned consent, an automatic port, host-readable health** | **done** | `EmbedConsent` (D88), `ControlPort.resolve` + `GromEmbed.AUTO_PORT` (D89), `EmbedHealth` projection + `GromEmbed.health` (D90), `GromClient.bind(createIfMissing=false)` and a released registration after `onNullBinding`; `docs/TWO-IN-ONE.md` §2, §9 |
 | **1L — universal client connect: discovery, scoped services, a thin SDK** | **done** | `GET /grom/v1/connect` (D91), `services.read`/`services.call` + `Plugin.scopedOps` (D92), `app.grom.sdk.connect` HTTP client + compiled `examples/connect` (D93); `docs/specs/S6-client-connect.md` |
 | **1M — server network: discovery, a roster and scoped server-to-server calls** | **done** | `GET /v1/mesh` + `POST /v1/mesh/call` (D99, D100), per-peer service shares (D101), LAN beacon + BLE advert + Wi-Fi Direct DNS-SD + secure RFCOMM `bt://` (D102), untrusted bounded discovery (D103); `docs/MESH.md`, `docs/specs/S8-server-mesh.md`; API **11** |
+| **1N — an SSH/VPS you can actually diagnose, and more than one** | **done** | stage-based failure codes and keyboard-interactive passwords (D105), `sshVerify` without the data plane (D106), one current server and four live tunnels (D107); API **12**; `docs/SSH-BRIDGE.md` |
 | **1B — core hardening** | **next** | `apps/AppManifest.kt`, `apps/PortAllocator.kt`, `apps/HealthGate.kt`, `apps/ReleaseStore.kt`, `proc/ChildProcess.kt`, `adapters/`, `auth/Scope.kt` — none exist yet |
 | **2 — Application Manager MVP** | **blocked by 1B** | `apps/ApplicationManager.kt`, `apps/AppSupervisor.kt`, the gateway, `/v1/apps` |
 | **3 — runtimes and adapters** | blocked by 2 | `apps/runtime/`, `adapters/`, LND |
@@ -30,7 +31,7 @@ Task ids (`T-nn`) match §U of the master plan.
 | **5 — backup, CLI, advanced** | blocked by 4 | `backup/`, `cli/` |
 | **6 — production** | blocked by 5 | signing key, soak, review |
 
-Current version: `0.18.0` (versionCode 19). The thirteen gates in `tools/run-gates`
+Current version: `0.19.0` (versionCode 20). The thirteen gates in `tools/run-gates`
 are the baseline; every phase below adds tests, not gates that replace them.
 
 **The next concrete action** is T-01 (`apps/AppManifest.kt`), because every later
@@ -719,3 +720,51 @@ menu/contract tests; lint 0/0.
 Not closed: no physical phone has run the radios; Wi-Fi Direct groups with more
 than one Grom server need a real service record; BLE never carries data; and the
 mesh adds no background watching.
+
+### Phase 1N — an SSH/VPS you can diagnose, and more than one — **done**
+
+Reported from use: *"I cannot connect to my VPS over the public address and
+password."* The engine had an answer and two of them were wrong.
+
+- **The code came from the exception class** (D105). MINA's `SshException` *is*
+  an `IOException`, so a rejected password was reported as `SSH_UNAVAILABLE` —
+  "connection refused / DNS / network". The attempt now records the stage it is
+  in (`resolve`, `connect`, `handshake`, `auth`, `forward`) and the code follows
+  from it; a refused TCP connect, which MINA surfaces from the connect future,
+  is separated from a handshake failure by the cause chain.
+- **A wrong password on first use was reported as a changed host key.** The
+  catch block treated "no pin, but a fingerprint was confirmed" as a mismatch.
+  Only the key verifier may claim `HOST_KEY_MISMATCH` now.
+- **OpenSSH's PAM answers a password login as one non-echoing
+  `keyboard-interactive` prompt**, which the client never answered, so a correct
+  password failed as "exhausted methods". `SshPasswordInteraction` answers
+  exactly that prompt and declines everything else.
+- **A pasted password** with a line break is refused (`BAD_PASSWORD`) instead of
+  stored as a secret that can never authenticate.
+- **`sshVerify`** runs resolve/connect/handshake/host-key/auth without the data
+  plane and requests the forward only when one is running, reporting
+  `forwardChecked`. The screen says "accepted, but the tunnel was not tested"
+  rather than "connected" (D106).
+- **Many servers, one current.** The current server is one id in the file,
+  shown first and marked, carried by `/v1/status` as `current: true`, and cleared
+  when deleted. Live tunnels go from two to four, because that was the cap that
+  forced an operator with three hosts to forget one (D107).
+
+- **The test gate could pass on a filtered run** (D108). `tools/test-agent` runs
+  `:engine:testDebugUnitTest --tests 'app.grom.server.agent.*'`, and Gradle keeps
+  one results directory per task and clears it at the start of every run — so
+  the filtered run erased the full suite's evidence. 92 test classes became five
+  result files, 43 of 838 tests had run, and `run-gates` still printed "JVM
+  tests: OK". The gate now clears the results before running, `tools/
+  check-test-reports` compares the test classes on disk with the XML Gradle
+  actually wrote (and fails on a subset), and the filtered run writes to its own
+  directory.
+
+Gate: `tools/run-gates` **13/13**, policy **78/78** (#74–#78), `SshTunnelManagerTest`
+**14** (wrong password, closed port, unresolvable name, keyboard-interactive-only
+server, verify with and without the data plane), `SshTargetStoreTest` **16**
+(pasted line break, the current id), plus the SDK contract at API 12; lint 0/0.
+
+Not closed: no physical phone has dialled a real VPS; the `SSH_UNAVAILABLE` path
+for a build without Ed25519 is still untestable on a normal JVM; and four live
+tunnels are still four threads the phone pays for.

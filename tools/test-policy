@@ -57,9 +57,12 @@ check "control bind allow-list" \
 check "no wildcard bind outside a bind policy" \
   bash -c "! grep -rn '\"0\.0\.0\.0\"' $MAIN --include='*.kt' | grep -vE 'core/(Super)?BindPolicy\.kt'"
 
-# 7. no hostname resolution on the bind path
-check "no InetAddress.getByName in main sources" \
-  bash -c "! grep -rn 'InetAddress.getByName' $MAIN --include='*.kt'"
+# 7. no hostname resolution on the bind path (S5-R005). The rule is about the
+#    address the data plane binds, which must be a literal; a dialled SSH target
+#    is a name the operator typed, and resolving it once is how a typo gets its
+#    own code instead of "handshake failed" (D105).
+check "no InetAddress.getByName on the bind path" \
+  bash -c "! grep -rn 'InetAddress.getByName' $MAIN/core $MAIN/superserver $MAIN/mesh --include='*.kt'"
 
 # 8. token comparison is constant time
 check "constant-time token compare" \
@@ -285,7 +288,7 @@ check "the doctor block is three fields and stays out of the exports" \
 #     kept its own literal that nobody bumped. The runtime must therefore report
 #     the SDK constant and carry no numeric literal of its own.
 check "the runtime reports the SDK's API version, not its own literal" \
-  bash -c "grep -q 'override fun apiVersion(): Int = GromClient.API_VERSION' $MAIN/ServerRuntime.kt && ! grep -qE 'override fun apiVersion\(\): Int = [0-9]' $MAIN/ServerRuntime.kt && grep -q 'const val API_VERSION: Int = 11' sdk/src/main/java/app/grom/sdk/GromClient.kt"
+  bash -c "grep -q 'override fun apiVersion(): Int = GromClient.API_VERSION' $MAIN/ServerRuntime.kt && ! grep -qE 'override fun apiVersion\(\): Int = [0-9]' $MAIN/ServerRuntime.kt && grep -q 'const val API_VERSION: Int = 12' sdk/src/main/java/app/grom/sdk/GromClient.kt"
 
 # 49. a phone can hold two Groms (D85). The embedding host must be able to pick
 #     the loopback control port, and a port that is taken must be reported as
@@ -451,6 +454,41 @@ check "the mesh screen is pure and its codes are documented" \
 #     the other operator cannot interpret in front of the approval screen.
 check "a pairing grants peer scopes only, and the mesh asks for services" \
   bash -c "grep -q 'val PEER_GRANTABLE' $MAIN/cluster/PeerRecord.kt && ! sed -n '/val PEER_GRANTABLE/,/)/p' $MAIN/cluster/PeerRecord.kt | grep -q 'MESH_' && grep -q 'PEER_GRANTABLE' $MAIN/cluster/FleetService.kt && grep -q 'PEER_GRANTABLE' $MAIN/cluster/Pairing.kt && grep -q 'val PEER_GRANTABLE' $MAIN/cluster/PeerRecord.kt && grep -q 'PAIR_SERVICES_CALL' app/src/main/java/app/grom/server/ui/MeshModel.kt && grep -q 'fun pairScopes' app/src/main/java/app/grom/server/ui/MeshModel.kt && grep -q 'grantedByMe = scopes' $MAIN/cluster/PeerStore.kt"
+
+# 74. an SSH failure is diagnosed by the stage that broke, not by the exception
+#     class (D105). MINA raises SshException — an IOException — for a rejected
+#     password, so a type-based mapping reported "network unreachable" for a
+#     wrong password. The stage is advanced before each call, every connection
+#     stage has its own code, and a mismatch may only be claimed by the verifier.
+check "an ssh failure is diagnosed by stage, not by exception class" \
+  bash -c "grep -q 'enum class Stage' $MAIN/ssh/SshTunnelManager.kt && grep -q 'SSH_AUTH_FAILED' $MAIN/ssh/SshTunnelManager.kt && grep -q 'SSH_HOST_UNKNOWN' $MAIN/ssh/SshTunnelManager.kt && grep -q 'SSH_HOST_UNREACHABLE' $MAIN/ssh/SshTunnelManager.kt && grep -q 'SSH_HANDSHAKE_FAILED' $MAIN/ssh/SshTunnelManager.kt && grep -q 'stage.set(Stage.AUTH)' $MAIN/ssh/SshTunnelManager.kt && grep -q 'hasCause<' $MAIN/ssh/SshTunnelManager.kt && ! grep -q 'is java.io.IOException -> \"SSH_UNAVAILABLE\"' $MAIN/ssh/SshTunnelManager.kt && grep -q 'if (!accepted && (pinned != null || trust != null)) mismatch.set(true)' $MAIN/ssh/SshTunnelManager.kt"
+
+# 75. a credential check does not need the data plane and never claims a
+#     forward it did not attempt (D106). Without this the operator cannot test a
+#     public address and password at all: connect refuses before a socket exists.
+check "a credential check works without the data plane and says what it checked" \
+  bash -c "grep -q 'fun verify(id: String, trustHostKey: String? = null): Result' $MAIN/ssh/SshTunnelManager.kt && grep -q 'Result.Verified' $MAIN/ssh/SshTunnelManager.kt && grep -q 'val forwardChecked = local != null' $MAIN/ssh/SshTunnelManager.kt && grep -q '\"forwardChecked\" to result.forwardChecked' $MAIN/ServerRuntime.kt && grep -q 'sshVerify' $AIDL && grep -q 'sshVerify' $MAIN/service/GromService.kt"
+
+# 76. the current server is one id for the file, it is refused when unknown, and
+#     deleting it clears the selection instead of leaving a dangling one (D107).
+check "one current server, stored once and never dangling" \
+  bash -c "grep -q 'fun setActive(id: String?)' $MAIN/ssh/SshTargetStore.kt && grep -q 'TARGET_NOT_FOUND' $MAIN/ssh/SshTargetStore.kt && grep -q 'val chosen = activeId?.takeIf { id -> records.any { it.id == id } }' $MAIN/ssh/SshTargetStore.kt && grep -q '\"activeId\" to chosen' $MAIN/ssh/SshTargetStore.kt && grep -q 'fun activeId()' $MAIN/ssh/SshTargetStore.kt && grep -q 'sshSetActiveJson' $AIDL"
+
+# 77. a password with a control character is refused with the reason, because a
+#     pasted line break otherwise stores a secret that can never authenticate
+#     and the server answers it exactly like a wrong password (D105).
+check "a pasted line break in a password is refused, not stored" \
+  bash -c "grep -q 'isISOControl' $MAIN/ssh/SshTarget.kt && grep -q 'BAD_PASSWORD' $MAIN/ssh/SshTarget.kt && grep -q 'control character' $MAIN/ssh/SshTarget.kt"
+
+# 78. a green test gate must mean every test class ran (D108). Gradle keeps one
+#     results directory per task and clears it at the start of every run, so a
+#     *filtered* run of the same task (tools/test-agent runs it with --tests)
+#     deleted the full suite's evidence: 92 test classes became five result
+#     files, 43 of 838 tests ran, and the gate still said "JVM tests: OK". The
+#     gate now clears the results, checks them afterwards, and the filtered run
+#     writes to its own directory.
+check "the test gate proves every test class ran, not just that gradle said ok" \
+  bash -c "grep -q 'check-test-reports' tools/run-gates && grep -q 'rm -rf engine/build/test-results' tools/run-gates && grep -q '@Test' tools/check-test-reports && grep -q 'ran\" -lt \"\$expected\"' tools/check-test-reports && grep -q 'gromTestReportsDir' tools/test-agent && grep -q 'gromTestReportsDir' engine/build.gradle.kts"
 
 echo
 TOTAL=$((PASS + FAIL))

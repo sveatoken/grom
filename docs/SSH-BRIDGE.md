@@ -64,7 +64,7 @@ Fingerprints use the OpenSSH `SHA256:…` form, the same string as
 | Mode | On disk | On the wire |
 |---|---|---|
 | `KEY` (preferred) | private key text sealed by `AndroidKeystoreSecretBox` | public-key auth |
-| `PASSWORD` | password sealed by `AndroidKeystoreSecretBox` | password auth |
+| `PASSWORD` | password sealed by `AndroidKeystoreSecretBox` | password auth, and the single non-echoing `keyboard-interactive` prompt OpenSSH asks through PAM (D105) |
 
 * *Generate Ed25519 key* creates a pair with the CC0 EdDSA provider, stores the
   private half sealed and shows the `ssh-ed25519 AAAA…` line to copy into
@@ -75,6 +75,17 @@ Fingerprints use the OpenSSH `SHA256:…` form, the same string as
   export, in an audit record or in logcat.
 * Changing the target's host or port **drops the pin**: a different machine must
   not inherit the old trust.
+* A password containing a control character is **refused before it is stored**
+  (`BAD_PASSWORD`, "a pasted line break?"). A trailing newline from a paste is
+  otherwise a secret that can never authenticate, and the server's answer to it
+  is exactly its answer to a wrong password (D105).
+* Password authentication also answers **one non-echoing interactive prompt**
+  (`SshPasswordInteraction`). OpenSSH with `UsePAM yes` — the default on Debian
+  and Ubuntu — accepts password logins through `keyboard-interactive`, and
+  without a handler a correct password fails as "exhausted authentication
+  methods". The handler answers only a single non-echoing prompt; a second
+  factor or a multi-question challenge is declined and authentication falls
+  through to the next method.
 
 ---
 
@@ -83,7 +94,7 @@ Fingerprints use the OpenSSH `SHA256:…` form, the same string as
 | Limit | Value |
 |---|---|
 | Saved targets | none (bounded only by the 512 KiB store, D64) |
-| Simultaneously active tunnels | 2 |
+| Simultaneously active tunnels | 4 (D107) |
 | Connect / auth timeout | 15 s each |
 | Remote bind address | `127.0.0.1` on the VPS |
 | Forward port | per target, default 47002; **must be unique per host** when several phones use one VPS (41001–41099 by convention, D78) |
@@ -91,13 +102,33 @@ Fingerprints use the OpenSSH `SHA256:…` form, the same string as
 Saved servers are not capped: the count limit was removed because adding a
 server costs no phone resource, and the store refuses an over-size write with
 `SSH_STORE_FULL` instead of silently dropping records. Live tunnels are capped
-at two, and the screen says so as soon as a third server is saved (the extra
+at four, and the screen says so as soon as a fifth server is saved (the extra
 servers stay idle).
+
+The limit is a **phone** cost, not a policy: every live tunnel is a thread, a
+socket, an SSH session and a MINA transport. Four lets an operator with several
+VPS hosts keep them all reachable without forgetting one; beyond that the
+refusal is named (`TOO_MANY_TUNNELS`) instead of silently dropping a session.
+
+### More than one server
+
+The store keeps **many** servers and exactly **one current** one (D107). The
+current server is a single id in `ssh-targets.json`, so two records cannot both
+claim it; the list shows it first and marked, and `/v1/status` carries
+`current: true` on that tunnel (the id is already there — no address is added,
+D59). Deleting the current server clears the selection rather than leaving a
+dangling id.
+
+The current server is a **label for the operator**, not a background behaviour:
+it does not auto-connect, and it does not change what the hub polls. Choosing it
+is one tap and is recorded in the audit log as `ssh.active`.
 
 The tunnel refuses to start when the public data plane is not running
 (`DATA_PLANE_NOT_RUNNING`): pointing a public port at a closed one would be a
-lie. It also refuses when the target is disabled, when no credential is stored,
-or when the stored key cannot be parsed.
+lie. **Test connection** is the call that answers "why does my address and
+password not work" without it (§7). It also refuses when the target is
+disabled, when no credential is stored, or when the stored key cannot be
+parsed.
 
 ---
 
@@ -141,25 +172,76 @@ loopback-only and reach it through the SSH session itself.
 | `TARGET_DISABLED` | operator disabled the target |
 | `KEY_MISSING` / `PASSWORD_MISSING` | no usable credential |
 | `KEY_INVALID` | stored private key cannot be parsed |
-| `SSH_UNAVAILABLE` | this build has no Ed25519 provider |
 | `DATA_PLANE_NOT_RUNNING` | nothing to forward to |
 | `CONNECTING` | an attempt is already running |
 | `ALREADY_CONNECTED` | tunnel is up |
-| `TOO_MANY_TUNNELS` | two tunnels are already active |
+| `TOO_MANY_TUNNELS` | four tunnels are already active (D107) |
 | `HOST_KEY_UNVERIFIED` | first use; confirm the fingerprint |
-| `HOST_KEY_MISMATCH` | pinned key changed; connection refused |
-| `SSH_TIMEOUT` | connect or auth timed out |
-| `SSH_UNAVAILABLE` | connection refused / DNS / network |
+| `HOST_KEY_MISMATCH` | the fingerprint was compared and differed; connection refused |
+| `SSH_HOST_UNKNOWN` | the name did not resolve (stage `resolve`) |
+| `SSH_HOST_UNREACHABLE` | nothing accepted a connection on that address and port (stage `connect`) |
+| `SSH_TIMEOUT` | no answer in time — connect, handshake or auth (stage `connect`) |
+| `SSH_HANDSHAKE_FAILED` | something answered but the SSH handshake did not complete (stage `handshake`) |
+| `SSH_AUTH_FAILED` | the server rejected the username, the password or the key (stage `auth`) |
 | `SSH_FORWARD_REFUSED` | the server refused the remote port (already in use, or forwarding forbidden) — distinct from a network failure (D78) |
 | `BAD_FORWARD_PORT_CONFLICT` | the store refused a second target on the same host with the same forward port |
+| `SSH_UNAVAILABLE` | this build has no Ed25519 provider (`preflight` only) |
 | `SSH_FAILED` | anything else; the message is never the driver's |
+
+Each failure also carries `stage` (`resolve`, `connect`, `handshake`, `auth`,
+`forward`). The code comes from **which stage threw**, not from the exception
+class (D105):
+
+* MINA raises `SshException`, which **is** an `IOException`, for a rejected
+  password. Mapping by type therefore reported a wrong password as
+  `SSH_UNAVAILABLE` — "connection refused / DNS / network" — and sent the
+  operator to look at a firewall that was never the problem.
+* A refused TCP connection surfaces from MINA when the connect future is
+  verified, at the same place as a handshake failure. The cause chain separates
+  them: `ConnectException`, `NoRouteToHostException` and `UnknownHostException`
+  survive it, and a handshake failure never carries one.
+* The host key is the only source of `HOST_KEY_MISMATCH`. Before D105 the code
+  also claimed a mismatch for *any* failure after the operator had confirmed a
+  first-use fingerprint — so a wrong password on first use was reported as
+  "the host key changed", with an offer to forget the pin.
 
 After a tunnel drops unexpectedly the state is `failed` with
 `SSH_SESSION_CLOSED`; a deliberate disconnect is `disconnected`, not an error.
 
 ---
 
-## 7. Licensing
+## 7. Checking a server before you connect (D106)
+
+*Connect* needs the public data plane, because it asks the VPS to forward a port
+to it. That means the operator with a public address and a password had no way
+to find out whether the address, the port, the host key or the password was the
+problem — the only answer was `DATA_PLANE_NOT_RUNNING`, which says nothing about
+the VPS.
+
+**Test connection** (`sshVerify`) runs the same session without a forward:
+
+| Step | When it runs | Reported as |
+|---|---|---|
+| name resolution and TCP connect | always | `SSH_HOST_UNKNOWN`, `SSH_HOST_UNREACHABLE`, `SSH_TIMEOUT` |
+| handshake and host key | always | `HOST_KEY_UNVERIFIED`, `HOST_KEY_MISMATCH`, `SSH_HANDSHAKE_FAILED` |
+| authentication | always | `SSH_AUTH_FAILED` |
+| reverse port forward | **only when the data plane is running** | `SSH_FORWARD_REFUSED` |
+
+The reply carries `forwardChecked`. It is `false` when the forward was not
+attempted, and the screen then says *"Address, host key and password accepted.
+The tunnel was not tested because the public API is off."* — never "connected".
+
+A check leaves nothing behind: the session is closed, no tunnel is registered,
+and the only write is the host-key pin the operator just confirmed (the same
+write a first connect makes). It is safe to run against a VPS that is already
+connected from the same phone.
+
+The check works with the data plane off, which is the state an operator is in
+when a fresh server will not accept them.
+
+---
+
+## 8. Licensing
 
 `sshd-core` (Apache-2.0), `net.i2p.crypto:eddsa` (CC0-1.0) and SLF4J (MIT) are
 listed in `third_party/THIRD_PARTY.md` and checked by
@@ -169,7 +251,7 @@ provides a minimal stand-in and narrows lint's `InvalidPackage` suppression to
 that exact reference (`engine/lint.xml`). Without it, an exception-unwrapping
 path would throw `NoClassDefFoundError` on a device.
 
-## 8. Notifications
+## 9. Notifications
 
 If the operator has enabled alerts (`NOTIFICATIONS.md`, D65), the bridge emits a
 message on these transitions only:
@@ -181,12 +263,13 @@ message on these transitions only:
 | `ssh.failed` | `Grom: external server connection failed (CODE).` |
 | `ssh.hostkey.mismatch` | `Grom: external server key changed; refused.` |
 
-`ssh.disconnect` (a deliberate tap), `ssh.hostkey.learned` and
-`ssh.hostkey.unverified` do **not** notify: the first is the operator's own
-action, and the other two are part of the first-use handshake the operator is
-looking at right now.
+`ssh.disconnect` (a deliberate tap), `ssh.hostkey.learned`,
+`ssh.hostkey.unverified`, `ssh.verify` (D106) and `ssh.active` (D107) do **not**
+notify: the first is the operator's own action, the next two are part of the
+first-use handshake the operator is looking at right now, and the last two are
+the result of a tap the operator just made.
 
-The message carries the stable code (`SSH_UNAVAILABLE`, `SSH_TIMEOUT`,
-`HOST_KEY_MISMATCH`, `SSH_SESSION_CLOSED`) and never the host, the port, the user
-name or the fingerprint — the audit `detail` contains the target id and the
-host, and it is precisely what must not leave the device.
+The message carries the stable code (`SSH_AUTH_FAILED`, `SSH_HOST_UNREACHABLE`,
+`SSH_TIMEOUT`, `HOST_KEY_MISMATCH`, `SSH_SESSION_CLOSED`) and never the host, the
+port, the user name or the fingerprint — the audit `detail` contains the target
+id and the host, and it is precisely what must not leave the device.

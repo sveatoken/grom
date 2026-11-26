@@ -48,6 +48,24 @@ android {
         // session detail can ever reach logcat.
         unitTests.all {
             it.systemProperty("org.slf4j.simpleLogger.defaultLogLevel", "debug")
+            // A caller that narrows this task (tools/test-agent runs it with
+            // `--tests`) writes its JUnit XML to its own directory when it asks
+            // to. Gradle keeps one results directory per task and clears it at
+            // the start of every run, so a filtered run otherwise erases the
+            // full suite's evidence: five result files survived for 92 test
+            // classes, and every later inspection agreed that 43 of 838 tests
+            // had run. `tools/check-test-reports` reads the real one.
+            //
+            // This is configured here rather than through `tasks.withType<Test>`
+            // because AGP assigns the reports directory after the task is
+            // created; a `configureEach` block runs first and is overwritten.
+            val isolated = providers.gradleProperty("gromTestReportsDir").orNull
+            if (isolated != null) {
+                it.reports.junitXml.outputLocation.set(layout.buildDirectory.dir(isolated))
+                it.reports.html.outputLocation.set(
+                    layout.buildDirectory.dir("reports/isolated-tests/${it.name}")
+                )
+            }
         }
     }
 

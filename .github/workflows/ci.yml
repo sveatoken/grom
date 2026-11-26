@@ -74,6 +74,10 @@ jobs:
             :examples:connect:testDebugUnitTest \
             :app:testServer29DebugUnitTest \
             :app:testPeripheral26DebugUnitTest
+          # Gradle says "BUILD SUCCESSFUL" whether it ran 838 tests or five.
+          # This checks that every test class on disk produced a result, so a
+          # narrowed task cannot pass as a full suite (D108).
+          ./tools/check-test-reports
 
       - name: Policy gates (third-party ledger, static policy, IPC signing)
         run: |

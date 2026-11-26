@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# check-test-reports — every test class that exists must have actually run.
+#
+# Why this exists. Gradle writes one JUnit XML per executed test class and
+# **deletes the whole results directory** at the start of a test run, so that
+# directory is an honest record of the last execution. It is also how a full
+# suite can look green after running almost nothing: `tools/test-agent` runs
+# `:engine:testDebugUnitTest --tests 'app.grom.server.agent.*'`, which writes
+# five result files for 92 test classes — into the same directory the previous,
+# complete run had filled. The gate then said "JVM tests: OK" while 43 of 838
+# tests had run, and every later inspection of the reports agreed with the lie.
+#
+# `tools/run-gates` therefore clears the results first, runs the tests, and
+# calls this: the number of result files per task must cover the number of test
+# source files. A task that ran a subset is a failure, whichever way it was
+# narrowed. `tools/test-agent` now writes its filtered run to its own
+# directory, so it cannot erase the evidence either.
+#
+# The check is deliberately about classes, not test count: `@Ignore`, a
+# parameterised suite or a nested class all change the number of tests without
+# changing which classes ran, and a count-based rule would drift. A class file
+# on disk with an `@Test` in it and no XML means that class did not run.
+
+set -u
+cd "$(dirname "$0")/.." || exit 1
+
+FAIL=0
+
+# module <sources dir> <expected results dir> [<more results dirs>]
+module() {
+  local sources="$1"; shift
+  local expected
+  expected=$(grep -rl '@Test' "$sources" --include='*.kt' 2>/dev/null | wc -l)
+  if [ "$expected" -eq 0 ]; then
+    echo "  FAIL $sources holds no test classes at all" >&2
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  local dir
+  for dir in "$@"; do
+    if [ ! -d "$dir" ]; then
+      echo "  FAIL $dir: no results directory (tests did not run)" >&2
+      FAIL=$((FAIL + 1))
+      continue
+    fi
+    local ran tests
+    ran=$(find "$dir" -maxdepth 1 -name 'TEST-*.xml' | wc -l)
+    tests=$(grep -h -o 'tests="[0-9]*"' "$dir"/TEST-*.xml 2>/dev/null |
+      sed 's/[^0-9]//g' | awk '{ sum += $1 } END { print sum + 0 }')
+    if [ "$ran" -lt "$expected" ]; then
+      echo "  FAIL $dir: $ran of $expected test classes ran" >&2
+      FAIL=$((FAIL + 1))
+      continue
+    fi
+    if [ "$tests" -eq 0 ]; then
+      echo "  FAIL $dir: results hold no tests" >&2
+      FAIL=$((FAIL + 1))
+      continue
+    fi
+    # Gradle fails the task on a failing test, so this is a consistency check on
+    # the evidence rather than a second test runner.
+    if grep -l '<failure\|<error' "$dir"/TEST-*.xml >/dev/null 2>&1; then
+      echo "  FAIL $dir: a result records a failure" >&2
+      FAIL=$((FAIL + 1))
+      continue
+    fi
+    echo "  ok   $dir: $ran classes, $tests tests"
+  done
+}
+
+echo "== check-test-reports =="
+module engine/src/test engine/build/test-results/testDebugUnitTest
+module sdk/src/test sdk/build/test-results/testDebugUnitTest
+module examples/connect/src/test examples/connect/build/test-results/testDebugUnitTest
+module app/src/test \
+  app/build/test-results/testServer29DebugUnitTest \
+  app/build/test-results/testPeripheral26DebugUnitTest
+
+echo
+if [ "$FAIL" -ne 0 ]; then
+  echo "check-test-reports: FAILED ($FAIL checks)" >&2
+  exit 1
+fi
+echo "check-test-reports: OK (every test class ran)"

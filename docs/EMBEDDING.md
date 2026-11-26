@@ -130,7 +130,11 @@ missing. Ask the server for the truth:
 ```kotlin
 val client = GromEmbed.newClient(context)   // Target.EMBEDDED
 client.bind(object : GromClient.Listener {
-    override fun onConnected(apiVersion: Int) { /* apiVersion == 10 */ }
+    override fun onConnected(apiVersion: Int) {
+        // Compare against GromClient.API_VERSION rather than a literal: a host
+        // that hardcodes it goes stale every time the contract grows (D29).
+        if (apiVersion < GromClient.API_VERSION) { /* older server; degrade */ }
+    }
     override fun onDisconnected(reason: String) { /* show the reason */ }
 })
 val status = client.call(null) { it.statusJson() }
@@ -210,6 +214,11 @@ disk.
 | `aiSaveModelJson(json)` / `aiRemoveModel(id)` | **API 10**: the catalogue a host may offer |
 | `aiConfigureJson(json)` | **API 10**: `{enabled?, defaultModel?}`, absent fields kept |
 | `aiProbeProviderJson(providerId)` | **API 10**: one measured `max_tokens: 1` upstream call; the only thing that can make a provider lamp green (D96) |
+| `meshStatusJson()` / `meshConfigureJson(json)` | **API 11**: the server network — radios, nearby sightings and paired peers; the roster carries no endpoint (D99–D104) |
+| `meshScanJson()` / `meshRefreshJson()` | **API 11**: one discovery pass, and a re-read of every paired peer's `/grom/v1/connect` |
+| `meshSetSharesJson(json)` / `meshCallJson(json)` | **API 11**: which services a peer may use, and one relayed call through the existing signed API |
+| `sshVerify(id, trustFingerprint)` | **API 12**: one credential check that works without the data plane and reports the stage that broke (D106) |
+| `sshSetActiveJson(id)` | **API 12**: marks the operator's current server; it is a label, not a behaviour (D107) |
 
 ### Choosing the control port (D85)
 

@@ -266,7 +266,7 @@ no longer holds this device's key.
   older than API 10 answers `404` there, which the roster reports as
   `MESH_BAD_RESPONSE`; pairing and `services.*` calls are unaffected.
 - `api` in the connect document is the data-plane API version (S5), not the
-  Binder API. The Binder contract is API 11 (S4).
+  Binder API. The mesh methods enter the Binder contract at API 11 (S4 §16).
 - New carriers, if any, MUST be expressed as another endpoint scheme and
   discovered as candidates; they MUST NOT introduce a second request format.
 

@@ -48,10 +48,17 @@ check "no shell is used to launch" \
   bash -c "! grep -qE 'ProcessBuilder\(\"/system/bin/sh\"|sh -c' $PROCESS"
 
 # --- dynamic ------------------------------------------------------------------
+# The filtered run writes its reports to their own directory. Gradle clears one
+# results directory per task at the start of every run, so running this filter
+# into the default one deleted the full suite's evidence: 92 test classes became
+# five result files, and the gate still said "JVM tests: OK". The property is
+# read by engine/build.gradle.kts.
 echo "  ..   running JVM tests"
 if gradle -q :engine:testDebugUnitTest \
     --tests 'app.grom.server.agent.*' \
     --tests 'app.grom.server.core.AgentConfigTest' \
+    --rerun \
+    -PgromTestReportsDir=test-results/agent-only \
     --console=plain \
     -Dorg.gradle.jvmargs="-Xmx1024m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8" >/tmp/grom-test-agent.log 2>&1; then
   PASS=$((PASS + 1))

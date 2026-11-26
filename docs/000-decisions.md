@@ -892,13 +892,15 @@ dialling it from a phone would be neither safe nor honest.
 **ACCEPTED.** The saved-target count cap was removed. The only bound is the
 store's 512 KiB file limit, enforced **at write time** with `SSH_STORE_FULL`:
 an over-size write would otherwise make every record unreadable on the next
-start, which is silent data loss. `MAX_ACTIVE = 2` stays, because each live
-tunnel costs a thread, a socket, an SSH session and a MINA transport.
+start, which is silent data loss. `MAX_ACTIVE = 2` stayed until D107, when the
+cap was raised to four for an operator with several hosts; the cost it names — a
+thread, a socket, an SSH session and a MINA transport per live tunnel — did not
+change.
 
-The UI and `sshStatusJson()` show an advisory once more than two servers are
-saved (`ssh_advisory`, `EXTRA_SERVERS_IDLE`): extra servers stay idle until the
-operator connects them, and the screen says so rather than pretending the limit
-is storage.
+The UI and `sshStatusJson()` show an advisory once more servers are saved than
+can be connected (`ssh_advisory`, `EXTRA_SERVERS_IDLE`; four since D107): extra
+servers stay idle until the operator connects them, and the screen says so
+rather than pretending the limit is storage.
 
 *Why:* the operator asked to stop being told "no" for saving a server, while the
 phone still must not be over-committed. Two different limits deserve two
@@ -1754,3 +1756,130 @@ shows in words.
 *Enforced by:* `PairingTest` (a hello asking for `mesh.call` is refused),
 `PeerGrantTest` (a grant keeps the endpoint), `MeshModelTest` (`pairScopes`),
 `tools/test-policy` #73, S8-R015.
+
+---
+
+## D105 — an SSH failure is diagnosed by the stage that broke, not by its class
+**ACCEPTED.** Reported from use: *"I cannot connect to my VPS over the public
+address and password."* The engine could not answer the question, and in two
+ways it answered it wrongly.
+
+1. `SshTunnelManager` mapped failures by exception type: `TimeoutException` →
+   `SSH_TIMEOUT`, **`IOException` → `SSH_UNAVAILABLE`**, everything else →
+   `SSH_FAILED`. Apache MINA SSHD raises `SshException` — which *extends*
+   `IOException` — when authentication is rejected, so **a wrong password was
+   reported as "connection refused / DNS / network"**. The operator was told to
+   check a firewall. With `SSH_FAILED`, the message was the class name only
+   ("the SSH session failed (SshException)"), which carries no information by
+   design (a driver message can contain the host, the user and key fragments).
+2. After the operator confirmed the first-use fingerprint, **any** later failure
+   was reported as `HOST_KEY_MISMATCH`: the catch block treated "pinned is null
+   and a trust value was supplied" as a mismatch, even when the observed key was
+   byte-identical to the confirmed one. A wrong password on the first connect
+   therefore produced *"the host key changed — the server presented a different
+   key"*, with an offer to forget the pin. That describes a machine substitution
+   and is the opposite of what happened.
+
+The rule is now structural: the attempt records **which stage it is in**
+(`resolve`, `connect`, `handshake`, `auth`, `forward`) immediately before the
+call that can fail, and the code comes from the stage. MINA surfaces a refused
+TCP connection when the *connect future* is verified — the same call that does
+the key exchange — so the two are separated by the **cause chain**, where
+`ConnectException`, `NoRouteToHostException` and `UnknownHostException` survive
+and a handshake failure never carries one. The codes are `SSH_HOST_UNKNOWN`,
+`SSH_HOST_UNREACHABLE`, `SSH_TIMEOUT`, `SSH_HANDSHAKE_FAILED`, `SSH_AUTH_FAILED`
+and `SSH_FORWARD_REFUSED`; `SSH_UNAVAILABLE` remains only for "this build has no
+Ed25519 provider".
+
+Two related corrections travel with it:
+
+- **Keyboard-interactive.** OpenSSH with `UsePAM yes` — the default on Debian and
+  Ubuntu — accepts a password login as a single non-echoing
+  `keyboard-interactive` prompt, not as the `password` method. With no
+  `UserInteraction` the challenge is never answered and a **correct** password
+  fails as "exhausted available authentication methods". `SshPasswordInteraction`
+  answers exactly one non-echoing prompt and declines anything else, so a second
+  factor falls through instead of being answered with the password.
+- **A pasted password.** `BAD_PASSWORD` now refuses a control character
+  ("a pasted line break?"). Storing one produced a secret that could never
+  authenticate, and the server's answer to it is identical to its answer to a
+  wrong password.
+
+*Enforced by:* `SshTunnelManagerTest` (wrong password, closed port, unresolvable
+name, keyboard-interactive-only server), `SshTargetStoreTest` (pasted line
+break), `tools/test-policy` #74 and #77.
+
+## D106 — a credential check does not need the data plane
+**ACCEPTED.** `connect` requires the public data plane, because it asks the VPS
+to forward a port to it. That made the failing case untestable: with the data
+plane off, the operator with a fresh public address and password got
+`DATA_PLANE_NOT_RUNNING` — a true sentence about Grom that says nothing about
+the VPS.
+
+`sshVerify` runs the same session and reports each stage it could actually
+verify. The reverse forward is requested **only when the data plane is up**, and
+the reply carries `forwardChecked` so the screen can say *"Address, host key and
+password accepted. The tunnel was not tested because the public API is off."*
+rather than "connected". A check closes its session, registers no tunnel and
+changes nothing the operator is looking at; its only write is the host-key pin a
+first connect would have made anyway.
+
+*Enforced by:* `SshTunnelManagerTest` ("verify proves the credentials with the
+data plane off", "verify reports the forward when the data plane is up"),
+`tools/test-policy` #75, S4-R058.
+
+## D107 — many saved servers, one current one, four live
+**ACCEPTED.** The store already held many targets, but there was no way to say
+which one is *the* server: the UI showed an unordered list and `/v1/status` gave
+no hint, so an operator with three VPS hosts had to remember which was which.
+And the live-tunnel cap was two, which for three hosts means "forget one to use
+another".
+
+The current server is **one id in the file** (`activeId`), not a flag on each
+record: two records both claiming it is a state the store must not be able to
+reach. The list shows it first and marked, `/v1/status` carries `current: true`
+on that tunnel (the id is already in the projection — no address is added, D59),
+and deleting it clears the selection instead of leaving a dangling id. Choosing
+it is one tap, recorded as `ssh.active`, and it is a **label, not a behaviour**:
+nothing auto-connects and no poll is introduced.
+
+The cap becomes **four**. It is a phone cost — a thread, a socket, a session and
+a MINA transport each — and the refusal stays named (`TOO_MANY_TUNNELS`).
+
+*Enforced by:* `SshTargetStoreTest` (one id, survives edit, cleared by delete,
+unknown id refused), `SshTunnelManagerTest` (cap boundary), `tools/test-policy`
+#76.
+
+## D108 — a green test gate must mean every test class ran
+**ACCEPTED.** Found while auditing v0.19.0. `tools/run-gates` reported "JVM tests:
+OK" while **43 of 838** engine tests had run, and every later inspection of
+`engine/build/test-results/` agreed: five result files for 92 test classes.
+
+The cause was not the build cache, which is what an earlier note blamed.
+`tools/test-agent` narrows the *same* task —
+`:engine:testDebugUnitTest --tests 'app.grom.server.agent.*'` — and Gradle keeps
+**one results directory per task**, clearing it at the start of every run. The
+filtered run therefore deleted the full suite's evidence and left its own five
+files in its place. The gate itself had run everything; the proof had been
+overwritten by a later gate. A gate that cannot show what it ran is not a gate,
+and "the reports say 43" is exactly the sentence that makes a false green
+credible.
+
+Three changes, at three levels:
+
+- **The filtered run writes elsewhere.** `engine/build.gradle.kts` honours
+  `-PgromTestReportsDir`; `tools/test-agent` passes
+  `test-results/agent-only`, so it can never touch the full run's reports.
+- **The gate checks its own evidence.** `tools/run-gates` removes the results
+  directories before running the tests (a stale file cannot be mistaken for a
+  fresh one) and then calls `tools/check-test-reports`, which compares the test
+  classes on disk with the XML Gradle wrote and fails on a subset. It checks
+  **classes**, not test counts: `@Ignore`, a parameterised suite or a nested
+  class changes the count without changing which classes ran, and a count-based
+  rule would drift exactly as the hardcoded labels did.
+- **CI runs the same check**, because "BUILD SUCCESSFUL" is printed whether a
+  task ran 838 tests or five.
+
+*Enforced by:* `tools/check-test-reports` (proved against a run with five of 92
+result files: verdict `FAILED`), `tools/run-gates`, `.github/workflows/ci.yml`,
+`tools/test-policy` #78.

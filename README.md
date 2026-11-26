@@ -456,7 +456,15 @@ reaches Grom's data plane. The session may only request `tcpip-forward`; there
 is no shell, no exec and no agent forwarding, the host key is pinned on first
 use, and the client-side filter allows one destination — the local data plane.
 Credentials are generated (Ed25519) or pasted, and always sealed by the Android
-Keystore. See [`docs/SSH-BRIDGE.md`](docs/SSH-BRIDGE.md).
+Keystore.
+
+Keep **as many servers as you like** and mark one as your current one. A failure
+names the step that broke — name, connect, handshake, password or forward port —
+so a wrong password is never reported as an unreachable host. **Test
+connection** checks the address, host key and password *without* the public data
+plane, which is exactly the state you are in when a new VPS refuses you. Password
+logins also answer the single non-echoing `keyboard-interactive` prompt that
+OpenSSH asks through PAM. See [`docs/SSH-BRIDGE.md`](docs/SSH-BRIDGE.md).
 
 ## Super server (public API)
 

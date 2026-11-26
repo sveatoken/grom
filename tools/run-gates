@@ -39,14 +39,39 @@ step "build (APKs for the signing gate)" gradle_run \
   :testapps:samecert:assembleDebug \
   :testapps:foreigncert:assembleDebug
 
-step "JVM tests (engine, sdk, the client example and both flavours)" gradle_run \
-  :engine:testDebugUnitTest \
-  :sdk:testDebugUnitTest \
-  :examples:connect:testDebugUnitTest \
-  :app:testServer29DebugUnitTest \
-  :app:testPeripheral26DebugUnitTest
+# `--rerun` forces exactly the test tasks listed here to execute even when the
+# build cache holds a result for them. That is deliberate: a cached entry once
+# restored five result files for the whole engine suite (a filtered run had
+# written it), the gate went green, and "all tests pass" meant "43 of ~840
+# ran". A gate that can be satisfied by the cache is not a gate. Compilation
+# stays cached; only the tests always run.
+#
+# The result files are removed first, and the run is checked afterwards, because
+# the same lie arrives by a second road: `tools/test-agent` runs this same task
+# with `--tests`, and Gradle writes (and clears) one results directory per task.
+# The filtered run therefore erased the full suite's evidence and left five
+# files behind. `tools/check-test-reports` compares the classes that exist with
+# the classes Gradle says it ran, so a subset is a failure no matter how the
+# narrowing happened.
+jvm_tests() {
+  rm -rf engine/build/test-results sdk/build/test-results \
+    examples/connect/build/test-results app/build/test-results
+  gradle_run \
+    :engine:testDebugUnitTest \
+    :sdk:testDebugUnitTest \
+    :examples:connect:testDebugUnitTest \
+    :app:testServer29DebugUnitTest \
+    :app:testPeripheral26DebugUnitTest \
+    --rerun &&
+    ./tools/check-test-reports
+}
 
-step "static policy (73 checks)" ./tools/test-policy
+step "JVM tests (engine, sdk, the client example and both flavours)" jvm_tests
+
+# The check count is not repeated in this label: it was hardcoded, it drifted
+# (it said 73 while test-policy ran 77), and test-policy prints the real number
+# itself on the line below.
+step "static policy" ./tools/test-policy
 step "third-party ledger" ./tools/check-third-party
 step "IPC signing (C-008)" ./tools/verify-ipc-signing
 step "flavour contents (D87)" ./tools/check-flavours

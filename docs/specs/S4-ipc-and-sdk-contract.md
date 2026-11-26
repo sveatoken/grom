@@ -77,7 +77,7 @@ signature get all of them in F1. The interface also declares
 ### S4-R012
 `apiVersion()` returns `1` for F1. Clients MUST check it before assuming a
 method exists. API 2 returns `2` (S4-R028). Each later API section states the
-value it adds; the current contract is API 10, so the value is `10` (§15).
+value it adds; the current contract is API 12, so the value is `12` (§17).
 
 ### S4-R013
 `auditTail(int)` clamps `maxEntries` to 1…200, matching S2-R018.
@@ -131,7 +131,7 @@ matching signature is sufficient.
 ### S4-R021
 `testapps/samecert` is signed with the Grom test key. On a device where Grom is
 installed, it MUST bind and its listener MUST fire `onConnected(apiVersion)` with
-the contract version the server implements (`10` in API 10, §15).
+the contract version the server implements (`12` in API 12, §17).
 
 ### S4-R022
 `testapps/foreigncert` is signed with a different key. `bindService` MUST return
@@ -462,7 +462,51 @@ provider's endpoint and MUST report the measured result (`ok`, `code`, `detail`,
 dialling. `apiVersion()` MUST still report `GromClient.API_VERSION` rather than a
 literal.
 
-## 16. The embed layer a host calls (D88–D90)
+## 16. API 11 — the server network (D99–D103)
+
+API version **11** adds six methods. Every one applies `requireSameSigner()`.
+
+| Method | Meaning |
+|---|---|
+| `meshStatusJson()` | operator view: switches, radio readiness, paired servers, nearby candidates; the only projection that carries an address |
+| `meshConfigureJson(json)` | `{enabled?, advertise?, scan?}`; persists and applies |
+| `meshScanJson()` | one bounded scan now; never starts a timer |
+| `meshRefreshJson()` | re-reads each paired server's connect document (blocking) |
+| `meshSetSharesJson(json)` | `{nodeId, services:[…]}`: the per-peer service allow-list (D101) |
+| `meshCallJson(json)` | `{server, service, op, args?, body?}`: relays one signed call (D100) |
+
+The data plane's roster (`GET /v1/mesh`) carries no endpoint; only this
+signature-gated surface may show one, because the operator is the one approving
+it. `GromClient.API_VERSION` is the single source of the number and
+`apiVersion()` returns it.
+
+## 17. API 12 — SSH diagnosis and the current server (D105–D107)
+
+API version **12** adds two methods. Both apply `requireSameSigner()`.
+
+| Method | Meaning |
+|---|---|
+| `sshVerify(id, trustFingerprint)` | one credential check: resolve, connect, handshake, host key and authentication are always attempted; the reverse forward only when the data plane is up. Blocking. |
+| `sshSetActiveJson(id)` | marks the operator's current server; an empty id clears it. Returns `{ok, currentId}`. |
+
+### S4-R058 — a check reports what it checked, and a failure names its stage
+`sshVerify` MUST run without the data plane and MUST NOT require it to be
+running. Its reply MUST carry `forwardChecked`, `false` when the reverse port was
+not requested, and the UI MUST NOT render such a result as `connected`.
+
+Every SSH failure reply MUST carry `stage`, one of `resolve`, `connect`,
+`handshake`, `auth`, `forward`, and a `code` that follows from that stage
+(D105). The host key MUST be the only source of `HOST_KEY_MISMATCH`.
+
+`sshSetActiveJson` MUST store at most one current id for the file, MUST refuse
+an id that is not saved (`TARGET_NOT_FOUND`), and deleting the current server
+MUST clear the selection. The current server MUST NOT start, stop or poll
+anything.
+
+`sshVerify` MUST NOT leave a session open or register a tunnel; its only
+permitted write is the host-key pin the operator confirmed.
+
+## 18. The embed layer a host calls (D88–D90)
 
 The Binder contract is what a *client* uses. An embedding host uses a thin
 Kotlin layer on top of it, and that layer carries rules of its own because every
@@ -501,21 +545,3 @@ emit MUST be documented in `docs/TWO-IN-ONE.md`.
 MUST return `false` when no server is running, and `unbind()` MUST release the
 platform connection even after `onNullBinding` or `onBindingDied` (a registration
 that is dropped without `unbindService` leaks for the life of the process).
-
-## API 11 — the server network (D99–D103)
-
-API version **11** adds six methods. Every one applies `requireSameSigner()`.
-
-| Method | Meaning |
-|---|---|
-| `meshStatusJson()` | operator view: switches, radio readiness, paired servers, nearby candidates; the only projection that carries an address |
-| `meshConfigureJson(json)` | `{enabled?, advertise?, scan?}`; persists and applies |
-| `meshScanJson()` | one bounded scan now; never starts a timer |
-| `meshRefreshJson()` | re-reads each paired server's connect document (blocking) |
-| `meshSetSharesJson(json)` | `{nodeId, services:[…]}`: the per-peer service allow-list (D101) |
-| `meshCallJson(json)` | `{server, service, op, args?, body?}`: relays one signed call (D100) |
-
-The data plane's roster (`GET /v1/mesh`) carries no endpoint; only this
-signature-gated surface may show one, because the operator is the one approving
-it. `GromClient.API_VERSION` is the single source of the number and
-`apiVersion()` returns it.
