@@ -15,7 +15,7 @@ class GromClientContractTest {
 
     @Test
     fun `api version is 10`() {
-        assertEquals(10, GromClient.API_VERSION)
+        assertEquals(11, GromClient.API_VERSION)
     }
 
     @Test

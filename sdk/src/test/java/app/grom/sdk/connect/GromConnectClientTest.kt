@@ -86,6 +86,74 @@ class GromConnectClientTest {
         nonceFactory = { nonce }
     )
 
+
+    // ------------------------------------------------------------ server network
+
+    @Test
+    fun `the mesh roster parses servers, services and the local list`() {
+        val transport = FakeTransport {
+            GromHttpResponse(
+                200,
+                """
+                {"ok":true,"enabled":true,"localServices":["agent"],"servers":[
+                  {"nodeId":"0123456789abcdef","label":"B","fingerprint":"0123-4567-89ab-cdef",
+                   "state":"alive","services":[{"id":"agent","title":"Agent","scopedOps":["ping"]}],
+                   "servicesListed":true,"ai":{"enabled":true,"models":["m1"]}}
+                ]}
+                """.trimIndent()
+            )
+        }
+        val mesh = client(transport).mesh(GromCredential.Session("token"))
+        assertTrue(mesh.enabled)
+        assertEquals(listOf("agent"), mesh.localServices)
+        assertEquals(1, mesh.servers.size)
+        val server = mesh.servers.single()
+        assertEquals("0123456789abcdef", server.nodeId)
+        assertEquals("alive", server.state)
+        assertEquals("agent", server.services.single().id)
+        assertTrue(server.aiEnabled)
+        assertEquals(listOf("m1"), server.aiModels)
+        assertEquals(GromConnectClient.MESH_PATH, transport.requests.single().url.removePrefix("http://127.0.0.1:47002"))
+    }
+
+    @Test
+    fun `a mesh call posts the server, service and op and parses the relayed answer`() {
+        val transport = FakeTransport {
+            GromHttpResponse(
+                200,
+                """{"ok":true,"server":"0123456789abcdef","service":"agent","op":"ping","status":200,"result":{"pong":true}}"""
+            )
+        }
+        val call = client(transport).meshCall(
+            GromCredential.Session("token"),
+            "0123456789abcdef",
+            "agent",
+            "ping",
+            mapOf("x" to 1)
+        )
+        assertEquals(200, call.status)
+        assertEquals(true, call.result is Map<*, *>)
+        val request = transport.requests.single()
+        assertEquals("POST", request.method)
+        assertEquals(GromConnectClient.MESH_CALL_PATH, request.url.removePrefix("http://127.0.0.1:47002"))
+        val body = GromJson.parseObject(request.body)!!
+        assertEquals("0123456789abcdef", body["server"])
+        assertEquals("agent", body["service"])
+        assertEquals("ping", body["op"])
+    }
+
+    @Test
+    fun `a mesh call refuses a malformed node id before it builds a signature`() {
+        val transport = FakeTransport { GromHttpResponse(200, "{}") }
+        try {
+            client(transport).meshCall(GromCredential.Session("t"), "not-a-node", "agent", "ping")
+            fail("expected a refusal")
+        } catch (_: IllegalArgumentException) {
+            // expected
+        }
+        assertTrue(transport.requests.isEmpty())
+    }
+
     // ------------------------------------------------------------ base address
 
     @Test

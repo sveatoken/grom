@@ -22,7 +22,7 @@ package app.grom.sdk.ipc;
  */
 interface IGromServer {
 
-    /** API version; this revision implements API 8 (the measured Doctor report). */
+    /** API version; this revision implements API 11 (the server network). */
     int apiVersion();
 
     /** Same JSON document as GET /grom/v1/health. */
@@ -240,4 +240,34 @@ interface IGromServer {
      * not a measurement, and nothing here runs in the background (D96).
      */
     String aiProbeProviderJson(String providerId);
+
+    // ------------------------------------- API 11 (D99-D101, server network)
+
+    /**
+     * The operator view of the server network: switches, radio availability and
+     * missing permissions, the paired servers with their measured state and
+     * published services, and the nearby (unpaired) candidates. Addresses are
+     * present here because this call is signature-gated and the operator has to
+     * be able to pair; no address ever reaches `/v1/mesh`, `/v1/status` or an
+     * export (D59, D99).
+     */
+    String meshStatusJson();
+
+    /** `{enabled?, advertise?, scan?}`; absent fields are kept. */
+    String meshConfigureJson(String json);
+
+    /** One bounded scan now; this call never starts a periodic timer. */
+    String meshScanJson();
+
+    /** Re-reads each paired server's connect document now (blocking). */
+    String meshRefreshJson();
+
+    /** `{nodeId, services:[...]}`: which services one paired server may use here (D101). */
+    String meshSetSharesJson(String json);
+
+    /**
+     * `{server, service, op, args?, body?}` — calls one service on a paired
+     * server through this device's own identity, signed and scoped (D100).
+     */
+    String meshCallJson(String json);
 }

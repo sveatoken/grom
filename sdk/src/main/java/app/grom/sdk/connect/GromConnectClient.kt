@@ -90,6 +90,50 @@ class GromConnectClient(
     }
 
     /**
+     * `GET /v1/mesh` (`mesh.read`): the server network as this device sees it.
+     *
+     * The document names paired servers, their measured state and the services
+     * they publish. It contains **no endpoint**: an app that may read the roster
+     * still cannot learn where the other phones are (D59, D99).
+     */
+    fun mesh(credential: GromCredential): GromMesh =
+        GromMesh.from(decodeObject(call("GET", MESH_PATH, "", credential), "the server network"))
+
+    /**
+     * `POST /v1/mesh/call` (`mesh.call`): calls one service on a paired server.
+     *
+     * The host behind that server applies its own scopes to this device's key,
+     * exactly as it would to any client. [body] is the AI request document and
+     * applies only when [service] is `ai`; [args] applies to a plugin op.
+     */
+    fun meshCall(
+        credential: GromCredential,
+        server: String,
+        service: String,
+        op: String,
+        args: Map<String, Any?> = emptyMap(),
+        body: Map<String, Any?>? = null
+    ): GromMeshCall {
+        require(NODE_ID.matches(server)) { "invalid node id: $server" }
+        require(SERVICE_ID.matches(service)) { "invalid service id: $service" }
+        require(OP_PATTERN.matches(op)) { "invalid op: $op" }
+        val payload = linkedMapOf<String, Any?>("server" to server, "service" to service, "op" to op)
+        if (args.isNotEmpty()) payload["args"] = args
+        if (body != null) payload["body"] = body
+        val answer = decodeObject(
+            call("POST", MESH_CALL_PATH, GromJson.encode(payload), credential),
+            "the server network answer"
+        )
+        return GromMeshCall(
+            server = answer["server"] as? String ?: server,
+            service = answer["service"] as? String ?: service,
+            op = answer["op"] as? String ?: op,
+            status = (answer["status"] as? Number)?.toInt() ?: 0,
+            result = answer["result"]
+        )
+    }
+
+    /**
      * `POST /v1/plugins/{id}/rpc`.
      *
      * The op must be listed in the service's `scopedOps` for a scoped
@@ -372,6 +416,8 @@ class GromConnectClient(
         const val LOGIN_PATH: String = "/v1/auth/login"
         const val STATUS_PATH: String = "/v1/status"
         const val PLUGINS_PATH: String = "/v1/plugins"
+        const val MESH_PATH: String = "/v1/mesh"
+        const val MESH_CALL_PATH: String = "/v1/mesh/call"
         const val AI_MODELS_PATH: String = "/v1/ai/models"
         const val AI_CHAT_PATH: String = "/v1/ai/chat/completions"
 
@@ -383,6 +429,7 @@ class GromConnectClient(
         private const val SIGNATURE_BYTES: Int = 64
         private val NONCE: Regex = Regex("[A-Za-z0-9_-]{8,128}")
         private val SERVICE_ID: Regex = Regex("^[a-z][a-z0-9-]{1,31}$")
+        private val NODE_ID: Regex = Regex("^[0-9a-f]{16}$")
         private val OP_PATTERN: Regex = Regex("^[a-z][a-z0-9._-]{0,63}$")
 
         /**
@@ -570,6 +617,63 @@ data class GromService(
             (raw as? List<*>)?.mapNotNull { it as? String } ?: emptyList()
     }
 }
+
+/** One paired server in the mesh document (D99). */
+data class GromMeshServer(
+    val nodeId: String,
+    val label: String,
+    val fingerprint: String,
+    val state: String,
+    val services: List<GromService>,
+    val aiEnabled: Boolean,
+    val aiModels: List<String>
+) {
+    internal companion object {
+        fun listFrom(raw: Any?): List<GromMeshServer> =
+            (raw as? List<*>).orEmpty().mapNotNull { item ->
+                val map = item as? Map<*, *> ?: return@mapNotNull null
+                val nodeId = map["nodeId"] as? String ?: return@mapNotNull null
+                val ai = map["ai"] as? Map<*, *>
+                GromMeshServer(
+                    nodeId = nodeId,
+                    label = map["label"] as? String ?: nodeId,
+                    fingerprint = map["fingerprint"] as? String ?: "",
+                    state = map["state"] as? String ?: "unknown",
+                    services = GromService.listFrom(map["services"]),
+                    aiEnabled = ai?.get("enabled") as? Boolean ?: false,
+                    aiModels = (ai?.get("models") as? List<*>)?.mapNotNull { it as? String }
+                        ?: emptyList()
+                )
+            }
+    }
+}
+
+/** The parsed `GET /v1/mesh` document. */
+data class GromMesh(
+    val enabled: Boolean,
+    val servers: List<GromMeshServer>,
+    val localServices: List<String>
+) {
+    fun server(nodeId: String): GromMeshServer? = servers.firstOrNull { it.nodeId == nodeId }
+
+    internal companion object {
+        fun from(body: Map<String, Any?>): GromMesh = GromMesh(
+            enabled = body["enabled"] as? Boolean ?: false,
+            servers = GromMeshServer.listFrom(body["servers"]),
+            localServices = (body["localServices"] as? List<*>)?.mapNotNull { it as? String }
+                ?: emptyList()
+        )
+    }
+}
+
+/** The answer of one relayed call (D100). */
+data class GromMeshCall(
+    val server: String,
+    val service: String,
+    val op: String,
+    val status: Int,
+    val result: Any?
+)
 
 /** The parsed `GET /grom/v1/connect` document (D91). */
 class GromConnect private constructor(

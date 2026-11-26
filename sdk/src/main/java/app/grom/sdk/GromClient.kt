@@ -189,8 +189,9 @@ class GromClient(
          * device identity, mutual pairing and the fleet roster (D70-D75); API 7
          * adds the one-way scoped grant for an inbound reader (D76-D78); API 8
          * adds the measured Doctor report (D80-D84); API 9 adds a supported way
-         * for an embedding host to configure the data plane (D86).
+         * for an embedding host to configure the data plane (D86); API 10 adds
+         * the AI gateway (D94-D96); API 11 adds the server network (D99-D101).
          */
-        const val API_VERSION: Int = 10
+        const val API_VERSION: Int = 11
     }
 }
