@@ -38,6 +38,7 @@ object MenuModel {
 
     const val KEY_SSH: String = "ssh"
     const val KEY_FLEET: String = "fleet"
+    const val KEY_MESH: String = "mesh"
     const val KEY_NOSTR: String = "nostr"
     const val KEY_AI: String = "ai"
     const val KEY_PROJECTS: String = "projects"
@@ -68,6 +69,7 @@ object MenuModel {
         return listOf(
             MenuEntry(KEY_SSH, R.string.ui_external, R.string.menu_ssh_sub),
             MenuEntry(KEY_FLEET, R.string.ui_fleet, R.string.menu_fleet_sub),
+            MenuEntry(KEY_MESH, R.string.ui_mesh, R.string.menu_mesh_sub),
             MenuEntry(KEY_NOSTR, R.string.ui_nostr_lightning, R.string.menu_nostr_sub),
             MenuEntry(KEY_AI, R.string.ui_ai, R.string.menu_ai_sub),
             MenuEntry(KEY_PROJECTS, R.string.ui_projects, R.string.menu_projects_sub),
@@ -88,6 +90,7 @@ object MenuModel {
     fun titleFor(key: String): Int? = when (key) {
         KEY_SSH -> R.string.ui_external
         KEY_FLEET -> R.string.ui_fleet
+        KEY_MESH -> R.string.ui_mesh
         KEY_NOSTR -> R.string.ui_nostr_lightning
         KEY_AI -> R.string.ui_ai
         KEY_PROJECTS -> R.string.ui_projects

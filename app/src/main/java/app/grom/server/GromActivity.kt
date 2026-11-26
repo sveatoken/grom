@@ -63,6 +63,10 @@ import app.grom.server.ui.HelpModel
 import app.grom.server.ui.Lamp
 import app.grom.server.ui.MenuEntry
 import app.grom.server.ui.MenuModel
+import app.grom.server.ui.MeshModel
+import app.grom.server.ui.MeshNearbyRow
+import app.grom.server.ui.MeshScreen
+import app.grom.server.ui.MeshServerRow
 import app.grom.server.ui.NotifyModel
 import app.grom.server.ui.Palette
 import app.grom.server.ui.actionRow
@@ -174,6 +178,21 @@ class GromActivity : Activity() {
     private var fleetLoaded = false
     private var fleetRefreshing = false
     private var lastFleetSignature: String? = null
+
+    /** Server network (D99-D102): roster, nearby hints and radio readiness. */
+    private lateinit var meshNearbyList: LinearLayout
+    private lateinit var meshServerList: LinearLayout
+    private lateinit var meshToggleButton: TextView
+    private lateinit var meshStateText: TextView
+    private lateinit var meshRadiosText: TextView
+    private lateinit var meshDetail: TextView
+    private var meshScreen: MeshScreen? = null
+    private var meshRefreshing = false
+    private var lastMeshSignature: String? = null
+
+    /** Set while a permission dialog answers a toggle or a scan (D104). */
+    private var pendingMeshEnable = false
+    private var pendingMeshScan = false
 
     // Doctor (D80-D84). The document is the engine's measurement; this screen
     // only paints it, so nothing here can make a lamp greener than the engine
@@ -460,6 +479,7 @@ class GromActivity : Activity() {
         panel(MenuModel.KEY_DOCTOR) { buildDoctorSection(it) }
         panel(MenuModel.KEY_SSH) { buildSshSection(it) }
         panel(MenuModel.KEY_FLEET) { buildFleetSection(it) }
+        panel(MenuModel.KEY_MESH) { buildMeshSection(it) }
         panel(MenuModel.KEY_NOSTR) { buildNostrSection(it) }
         panel(MenuModel.KEY_AI) { buildAiSection(it) }
         panel(MenuModel.KEY_PROJECTS) { buildProjectsSection(it) }
@@ -616,6 +636,7 @@ class GromActivity : Activity() {
         render()
         // Probes run when the operator asks, never in the background (D74).
         if (key == MenuModel.KEY_FLEET && !fleetLoaded) refreshFleet()
+        if (key == MenuModel.KEY_MESH && meshScreen == null) refreshMesh()
         // A measurement, on demand, when the operator opens the screen (D74, D80).
         if (key == MenuModel.KEY_DOCTOR) refreshDoctor()
         // The gateway document is read when the section opens, never in a loop.
@@ -1563,6 +1584,556 @@ class GromActivity : Activity() {
             LinearLayout.LayoutParams.MATCH_PARENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
         )
+    }
+
+    // ------------------------------------------------------- Server network (D99)
+
+    private fun buildMeshSection(body: LinearLayout) {
+        if (!BuildConfig.GROMSERVER) {
+            body.addView(text(getString(R.string.mesh_unavailable), 12f, palette.muted))
+            return
+        }
+        body.addView(text(getString(R.string.mesh_hint), 12f, palette.muted))
+        body.addView(gap(10))
+        meshStateText = text("", 13f, palette.onSurface)
+        meshRadiosText = text("", 11f, palette.muted)
+        body.addView(meshStateText)
+        body.addView(gap(10))
+        body.addView(label(getString(R.string.mesh_radios), palette))
+        body.addView(gap(4))
+        body.addView(meshRadiosText)
+        body.addView(gap(8))
+        meshToggleButton = fleetButton(R.string.mesh_enable) { toggleMesh() }
+        body.addView(meshToggleButton)
+        body.addView(gap(6))
+        body.addView(fleetButton(R.string.mesh_scan) { scanMesh() })
+        body.addView(gap(6))
+        body.addView(fleetButton(R.string.mesh_refresh) { refreshMeshServices() })
+
+        body.addView(divider(palette))
+        body.addView(label(getString(R.string.mesh_nearby), palette))
+        meshNearbyList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        body.addView(meshNearbyList)
+
+        body.addView(divider(palette))
+        body.addView(label(getString(R.string.mesh_servers), palette))
+        meshServerList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        body.addView(meshServerList)
+        meshDetail = text("", 11f, palette.muted)
+        body.addView(gap(6))
+        body.addView(meshDetail)
+    }
+
+    /**
+     * Reads the engine's measurement now. There is no poll: this runs when the
+     * section opens, when the operator taps Refresh, and after an action.
+     */
+    private fun refreshMesh() {
+        if (!connected) {
+            toast(getString(R.string.toast_not_bound, getString(R.string.ui_mesh)))
+            return
+        }
+        if (meshRefreshing) return
+        meshRefreshing = true
+        Thread {
+            val document = runCatching { fleetDoc { it.meshStatusJson() } }.getOrNull()
+            handler.post {
+                meshRefreshing = false
+                if (document != null) {
+                    meshScreen = MeshModel.parse(document)
+                    lastMeshSignature = null
+                    renderMesh()
+                }
+            }
+        }.start()
+    }
+
+    /** Re-reads each paired server's published services, then repaints. */
+    private fun refreshMeshServices() {
+        if (!connected) {
+            toast(getString(R.string.toast_not_bound, getString(R.string.ui_mesh)))
+            return
+        }
+        if (meshRefreshing) return
+        meshRefreshing = true
+        if (::meshDetail.isInitialized) meshDetail.text = getString(R.string.mesh_scanning)
+        Thread {
+            runCatching { fleetDoc { it.meshRefreshJson() } }
+            val document = runCatching { fleetDoc { it.meshStatusJson() } }.getOrNull()
+            handler.post {
+                meshRefreshing = false
+                if (document != null) {
+                    meshScreen = MeshModel.parse(document)
+                    lastMeshSignature = null
+                    renderMesh()
+                    if (::meshDetail.isInitialized) meshDetail.text = ""
+                }
+            }
+        }.start()
+    }
+
+    private fun scanMesh() {
+        if (!connected) return
+        // Scan is also the first thing an operator taps after enabling
+        // discovery, so it asks for the radios' runtime permissions rather than
+        // scanning into a `MESH_PERMISSION_REQUIRED` refusal.
+        val missing = missingMeshPermissions()
+        if (missing.isNotEmpty()) {
+            pendingMeshScan = true
+            requestPermissions(missing.toTypedArray(), REQUEST_MESH_PERMISSIONS)
+            return
+        }
+        if (::meshDetail.isInitialized) meshDetail.text = getString(R.string.mesh_scanning)
+        Thread {
+            val result = runCatching { fleetDoc { it.meshScanJson() } }
+            handler.post {
+                result.getOrNull()?.let {
+                    meshScreen = MeshModel.parse(it)
+                    lastMeshSignature = null
+                    renderMesh()
+                }
+                if (::meshDetail.isInitialized) meshDetail.text = ""
+                result.exceptionOrNull()?.let { toast(meshFailure(it)) }
+            }
+        }.start()
+    }
+
+    private fun toggleMesh() {
+        if (!connected) return
+        val next = !(meshScreen?.enabled ?: false)
+        // Turning discovery on needs its runtime permissions first: the engine
+        // reports which are missing, and asking only after the radios have
+        // failed would leave the operator with an error they cannot fix here.
+        if (next) {
+            val missing = missingMeshPermissions()
+            if (missing.isNotEmpty()) {
+                pendingMeshEnable = true
+                requestPermissions(missing.toTypedArray(), REQUEST_MESH_PERMISSIONS)
+                return
+            }
+        }
+        applyMeshEnabled(next)
+    }
+
+    private fun applyMeshEnabled(enabled: Boolean) {
+        Thread {
+            val result = runCatching {
+                fleetDoc { it.meshConfigureJson(Json.encode(mapOf("enabled" to enabled))) }
+            }
+            handler.post {
+                val document = result.getOrNull()
+                if (document != null) {
+                    meshScreen = MeshModel.parse(document)
+                    lastMeshSignature = null
+                    renderMesh()
+                } else {
+                    toast(meshFailure(result.exceptionOrNull()))
+                }
+            }
+        }.start()
+    }
+
+    /** The runtime permissions this phone's radios still need, if any. */
+    private fun missingMeshPermissions(): List<String> =
+        meshScreen?.radios.orEmpty()
+            .flatMap { it.missingPermissions }
+            .distinct()
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQUEST_MESH_PERMISSIONS) return
+        val enable = pendingMeshEnable
+        val scan = pendingMeshScan
+        pendingMeshEnable = false
+        pendingMeshScan = false
+        // Re-measure first: the rows then say what is still missing instead of
+        // assuming the grant covered everything that was asked for.
+        refreshMesh()
+        if (enable) applyMeshEnabled(true)
+        if (scan) scanMesh()
+    }
+
+    private fun meshFailure(failure: Throwable?): String {
+        val message = failure?.message.orEmpty()
+        return when {
+            message.contains("MESH_DISABLED") -> getString(R.string.mesh_state_off)
+            message.contains("MESH_PERMISSION_REQUIRED") -> getString(R.string.mesh_radio_missing, "nearby devices")
+            else -> message.ifEmpty { getString(R.string.mesh_state_off) }
+        }
+    }
+
+    private fun renderMesh() {
+        val screen = meshScreen ?: return
+        if (!::meshStateText.isInitialized) return
+
+        val signature = buildString {
+            append(screen.enabled).append('|').append(screen.nearby.size).append('|')
+            for (server in screen.servers) {
+                append(server.nodeId).append(':').append(server.state).append(':')
+                append(server.services.size).append(':').append(server.sharedServices.size).append('|')
+            }
+        }
+        if (signature == lastMeshSignature) return
+        lastMeshSignature = signature
+
+        meshStateText.text = if (screen.enabled) {
+            getString(R.string.mesh_state_on) + " · " + getString(
+                R.string.mesh_summary,
+                MeshModel.summary(screen.servers)
+            )
+        } else {
+            getString(R.string.mesh_state_off)
+        }
+        if (::meshToggleButton.isInitialized) {
+            meshToggleButton.text = getString(
+                if (screen.enabled) R.string.mesh_disable else R.string.mesh_enable
+            )
+        }
+
+        meshRadiosText.text = buildString {
+            if (screen.needsDataPlane()) {
+                append(getString(R.string.mesh_data_plane_off)).append("\n")
+            }
+            for (radio in screen.radios) {
+                if (isNotEmpty()) append("\n")
+                append(getString(MeshModel.transportRes(radio.transport))).append(": ")
+                append(
+                    when {
+                        !radio.available -> getString(
+                            R.string.mesh_radio_error,
+                            radio.error ?: "not supported"
+                        )
+                        radio.missingPermissions.isNotEmpty() -> getString(
+                            R.string.mesh_radio_missing,
+                            radio.missingPermissions.joinToString(", ")
+                        )
+                        else -> getString(R.string.mesh_radio_ok)
+                    }
+                )
+            }
+            append("\n")
+            append(
+                if (screen.localServices.isEmpty()) {
+                    getString(R.string.mesh_no_local_services)
+                } else {
+                    getString(
+                        R.string.mesh_local_services,
+                        screen.localServices.joinToString(", ")
+                    )
+                }
+            )
+        }
+
+        meshNearbyList.removeAllViews()
+        if (screen.nearby.isEmpty()) {
+            meshNearbyList.addView(text(getString(R.string.mesh_none_nearby), 12f, palette.muted))
+        } else {
+            for (candidate in screen.nearby) {
+                meshNearbyList.addView(meshNearbyRowView(candidate))
+                meshNearbyList.addView(divider(palette))
+            }
+        }
+
+        meshServerList.removeAllViews()
+        if (screen.servers.isEmpty()) {
+            meshServerList.addView(text(getString(R.string.mesh_none_servers), 12f, palette.muted))
+        } else {
+            for (server in screen.servers) {
+                meshServerList.addView(meshServerRowView(server))
+                meshServerList.addView(divider(palette))
+            }
+        }
+    }
+
+    private fun meshNearbyRowView(candidate: MeshNearbyRow): View {
+        val column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        column.addView(
+            text(MeshModel.nearbyLabel(candidate), 14f, palette.onSurface, Typeface.BOLD)
+        )
+        val trust = getString(
+            if (candidate.signedBeacon) R.string.mesh_signed else R.string.mesh_unsigned
+        )
+        val detail = if (candidate.address.isNotEmpty()) {
+            getString(
+                R.string.mesh_candidate_detail,
+                getString(MeshModel.transportRes(candidate.transport)),
+                candidate.address
+            ) + " · " + trust
+        } else {
+            getString(MeshModel.transportRes(candidate.transport)) + " · " + trust
+        }
+        column.addView(text(detail, 11f, palette.muted))
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(10), 0, dp(10))
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { showMeshCandidateDialog(candidate) }
+            addView(lampView(Lamp.UNKNOWN, palette))
+            addView(
+                column,
+                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            )
+            addView(text("\u203A", 20f, palette.muted))
+        }
+    }
+
+    private fun meshServerRowView(server: MeshServerRow): View {
+        val column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        column.addView(text(server.label, 15f, palette.onSurface, Typeface.BOLD))
+        column.addView(text(server.fingerprint, 11f, palette.muted))
+        column.addView(text(getString(MeshModel.stateRes(server)), 11f, stateColour(server.state)))
+        if (server.services.isNotEmpty()) {
+            column.addView(
+                text(
+                    getString(
+                        R.string.mesh_server_services,
+                        server.services.joinToString(", ") { it.id }
+                    ),
+                    11f,
+                    palette.muted
+                )
+            )
+        }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(10), 0, dp(10))
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { showMeshServerDialog(server) }
+            addView(lampView(MeshModel.lampOf(server), palette))
+            addView(
+                column,
+                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            )
+            addView(text("\u203A", 20f, palette.muted))
+        }
+    }
+
+    private fun showMeshCandidateDialog(candidate: MeshNearbyRow) {
+        if (!candidate.canPair()) {
+            toast(getString(R.string.mesh_candidate_no_address))
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle(R.string.mesh_pair_title)
+            .setMessage(
+                getString(R.string.mesh_pair_body) + "\n\n" + candidate.address
+            )
+            .setPositiveButton(R.string.fleet_pair_join) { _, _ ->
+                showMeshScopeDialog(candidate.address)
+            }
+            .setNegativeButton(R.string.fleet_cancel, null)
+            .show()
+    }
+
+    /**
+     * The scopes a mesh pairing asks the other server for (D104).
+     *
+     * The Devices flow has always asked for `status.read` and `config.read`
+     * only. The server network needs `services.read` to see what the other
+     * phone runs and `services.call` to use one of those services, so this
+     * dialog adds exactly those two — unticked, the user is back to the plain
+     * Devices pairing. Both operators see the same list before anything is
+     * stored, and a service still has to be shared afterwards (D101).
+     */
+    private fun showMeshScopeDialog(address: String) {
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(8), dp(20), 0)
+        }
+        column.addView(text(getString(R.string.mesh_pair_scopes_note), 12f, palette.muted))
+        val listBox = CheckBox(this).apply {
+            setText(R.string.mesh_pair_scope_list)
+            isChecked = true
+        }
+        val callBox = CheckBox(this).apply {
+            setText(R.string.mesh_pair_scope_call)
+            isChecked = true
+        }
+        column.addView(listBox)
+        column.addView(callBox)
+        AlertDialog.Builder(this)
+            .setTitle(R.string.mesh_pair_scope_title)
+            .setView(column)
+            .setPositiveButton(R.string.mesh_pair_scope_continue) { _, _ ->
+                showJoinDialog(
+                    address,
+                    MeshModel.pairScopes(listBox.isChecked, callBox.isChecked)
+                )
+            }
+            .setNegativeButton(R.string.fleet_cancel, null)
+            .show()
+    }
+
+    private fun showMeshServerDialog(server: MeshServerRow) {
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(8), dp(20), 0)
+        }
+        if (server.services.isEmpty()) {
+            column.addView(text(getString(R.string.mesh_server_no_services), 12f, palette.muted))
+        } else {
+            column.addView(
+                text(
+                    getString(
+                        R.string.mesh_server_services,
+                        server.services.joinToString(", ") { it.id }
+                    ),
+                    12f,
+                    palette.muted
+                )
+            )
+        }
+        column.addView(gap(8))
+        val local = meshScreen?.localServices.orEmpty()
+        // What this phone already opens to that server, in words: an empty
+        // allow-list is the compatibility default, so "nothing ticked" and
+        // "everything allowed" must not look the same in the dialog.
+        val shares = if (server.sharedServices.isEmpty()) {
+            getString(R.string.mesh_server_share_all)
+        } else {
+            MeshModel.sharesText(server)
+        }
+        column.addView(
+            text(
+                getString(R.string.mesh_server_shares, shares),
+                11f,
+                palette.muted
+            )
+        )
+        val boxes = LinkedHashMap<String, CheckBox>()
+        val allChecked = server.sharedServices.isEmpty()
+        for (id in local) {
+            val box = CheckBox(this).apply {
+                text = id
+                isChecked = allChecked || server.sharedServices.contains(id)
+            }
+            boxes[id] = box
+            column.addView(box)
+        }
+        if (local.isNotEmpty()) {
+            column.addView(gap(4))
+            column.addView(text(getString(R.string.mesh_shares_note), 11f, palette.muted))
+        }
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(getString(R.string.mesh_shares_title, server.label))
+            .setView(column)
+            .setPositiveButton(R.string.mesh_shares_save, null)
+            .setNeutralButton(R.string.mesh_call_echo, null)
+            .setNegativeButton(R.string.mesh_remove, null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val chosen = boxes.filterValues { it.isChecked }.keys.toList()
+                // Every service ticked is the same as the compatibility
+                // default: an empty list (D101).
+                val services = if (chosen.size == local.size) emptyList() else chosen
+                saveMeshShares(server, services)
+                dialog.dismiss()
+            }
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                callMeshEcho(server)
+            }
+            dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener {
+                dialog.dismiss()
+                confirmRemoveMeshServer(server)
+            }
+        }
+        dialog.show()
+    }
+
+    private fun saveMeshShares(server: MeshServerRow, services: List<String>) {
+        Thread {
+            val result = runCatching {
+                fleetDoc {
+                    it.meshSetSharesJson(
+                        Json.encode(mapOf("nodeId" to server.nodeId, "services" to services))
+                    )
+                }
+            }
+            handler.post {
+                val document = result.getOrNull()
+                if (document == null) {
+                    toast(meshFailure(result.exceptionOrNull()))
+                    return@post
+                }
+                toast(getString(R.string.mesh_shares_saved))
+                refreshMesh()
+            }
+        }.start()
+    }
+
+    private fun callMeshEcho(server: MeshServerRow) {
+        if (::meshDetail.isInitialized) meshDetail.text = getString(R.string.mesh_call_running)
+        Thread {
+            val result = runCatching {
+                fleetDoc {
+                    it.meshCallJson(
+                        Json.encode(
+                            mapOf(
+                                "server" to server.nodeId,
+                                "service" to "agent",
+                                "op" to "ping"
+                            )
+                        )
+                    )
+                }
+            }
+            handler.post {
+                if (::meshDetail.isInitialized) meshDetail.text = ""
+                val document = result.getOrNull()
+                if (document == null) {
+                    toast(
+                        getString(
+                            R.string.mesh_call_failed,
+                            meshFailure(result.exceptionOrNull())
+                        )
+                    )
+                    return@post
+                }
+                val status = (document["status"] as? Number)?.toInt() ?: 0
+                if (document["ok"] == true) {
+                    toast(getString(R.string.mesh_call_ok, status))
+                } else {
+                    val error = document["error"] as? Map<*, *>
+                    val code = error?.get("code") as? String ?: "MESH_REFUSED"
+                    toast(getString(R.string.mesh_call_failed, code))
+                }
+            }
+        }.start()
+    }
+
+    private fun confirmRemoveMeshServer(server: MeshServerRow) {
+        AlertDialog.Builder(this)
+            .setTitle(R.string.mesh_remove_title)
+            .setMessage(getString(R.string.mesh_remove_body) + "\n\n" + server.fingerprint)
+            .setPositiveButton(R.string.mesh_remove) { _, _ ->
+                Thread {
+                    val result = runCatching {
+                        val api = client.server
+                            ?: throw IllegalStateException(getString(R.string.toast_not_bound))
+                        api.peerRemove(server.nodeId)
+                    }
+                    handler.post {
+                        if (result.isSuccess) {
+                            toast(getString(R.string.mesh_removed))
+                            refreshMesh()
+                        } else {
+                            toast(meshFailure(result.exceptionOrNull()))
+                        }
+                    }
+                }.start()
+            }
+            .setNegativeButton(R.string.fleet_cancel, null)
+            .show()
     }
 
     private fun buildNostrSection(body: LinearLayout) {
@@ -3123,7 +3694,10 @@ class GromActivity : Activity() {
         }
     }
 
-    private fun showJoinDialog() {
+    private fun showJoinDialog(
+        prefillAddress: String = "",
+        scopes: List<String> = emptyList()
+    ) {
         val column = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(8), dp(20), 0)
@@ -3133,6 +3707,7 @@ class GromActivity : Activity() {
             setSingleLine()
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
         }
+        if (prefillAddress.isNotEmpty()) addressInput.setText(prefillAddress)
         val codeInput = EditText(this).apply {
             hint = getString(R.string.fleet_join_code)
             setSingleLine()
@@ -3152,19 +3727,25 @@ class GromActivity : Activity() {
                     toast(getString(R.string.fleet_join_address))
                     return@setPositiveButton
                 }
-                joinDevice(address, code)
+                joinDevice(address, code, scopes)
             }
             .setNegativeButton(R.string.fleet_cancel, null)
             .show()
     }
 
-    private fun joinDevice(address: String, code: String) {
+    private fun joinDevice(address: String, code: String, scopes: List<String> = emptyList()) {
         toast(getString(R.string.fleet_join_waiting))
         Thread {
             val result = runCatching {
                 fleetDoc {
                     it.peerJoinJson(
-                        Json.encode(mapOf("address" to address, "code" to code))
+                        Json.encode(
+                            linkedMapOf<String, Any?>("address" to address, "code" to code).apply {
+                                // Omitted keeps the Devices default (D104): only a
+                                // mesh pairing asks for the service scopes.
+                                if (scopes.isNotEmpty()) put("scopes", scopes)
+                            }
+                        )
                     )
                 }
             }
@@ -4236,5 +4817,8 @@ class GromActivity : Activity() {
     companion object {
         private const val REFRESH_MS = 1_000L
         private const val REQUEST_NOTIFICATIONS = 47001
+
+        /** The server network's Bluetooth/Wi-Fi-Direct runtime permissions (D104). */
+        private const val REQUEST_MESH_PERMISSIONS = 47002
     }
 }

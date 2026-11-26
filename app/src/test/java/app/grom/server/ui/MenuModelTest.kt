@@ -27,6 +27,7 @@ class MenuModelTest {
             listOf(
                 MenuModel.KEY_SSH,
                 MenuModel.KEY_FLEET,
+                MenuModel.KEY_MESH,
                 MenuModel.KEY_NOSTR,
                 MenuModel.KEY_AI,
                 MenuModel.KEY_PROJECTS,
