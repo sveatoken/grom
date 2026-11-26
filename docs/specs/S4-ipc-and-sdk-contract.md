@@ -501,3 +501,21 @@ emit MUST be documented in `docs/TWO-IN-ONE.md`.
 MUST return `false` when no server is running, and `unbind()` MUST release the
 platform connection even after `onNullBinding` or `onBindingDied` (a registration
 that is dropped without `unbindService` leaks for the life of the process).
+
+## API 11 — the server network (D99–D103)
+
+API version **11** adds six methods. Every one applies `requireSameSigner()`.
+
+| Method | Meaning |
+|---|---|
+| `meshStatusJson()` | operator view: switches, radio readiness, paired servers, nearby candidates; the only projection that carries an address |
+| `meshConfigureJson(json)` | `{enabled?, advertise?, scan?}`; persists and applies |
+| `meshScanJson()` | one bounded scan now; never starts a timer |
+| `meshRefreshJson()` | re-reads each paired server's connect document (blocking) |
+| `meshSetSharesJson(json)` | `{nodeId, services:[…]}`: the per-peer service allow-list (D101) |
+| `meshCallJson(json)` | `{server, service, op, args?, body?}`: relays one signed call (D100) |
+
+The data plane's roster (`GET /v1/mesh`) carries no endpoint; only this
+signature-gated surface may show one, because the operator is the one approving
+it. `GromClient.API_VERSION` is the single source of the number and
+`apiVersion()` returns it.

@@ -3,10 +3,10 @@
 #
 # These are the checks that cannot be expressed as a unit test because they are
 # about the shape of the tree: manifest permissions, absent symbols, headers.
-# See D1, D2, D5, D15, D18, D21, D39…D47, D52…D93 and S1-R002…S1-R047,
-# S5-R001…S5-R058, S6-R001…S6-R028.
+# See D1, D2, D5, D15, D18, D21, D39…D103 and S1-R002…S1-R048,
+# S5-R001…S5-R058, S6-R001…S6-R028, S8-R001…S8-R014.
 #
-# The gate is intentionally a fixed count: "59/59" is the number of passes.
+# The gate is intentionally a fixed count: the final line reports it.
 
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -162,7 +162,7 @@ check "server29 replaces the service with the gated export" \
 #     by check 6. A notifier reaches the network only through the shared
 #     transport seam, so it holds no socket symbol of its own.
 check "outbound client sockets confined to documented features" \
-  bash -c "! grep -rnE '\bSocket\s*\(|HttpURLConnection|openConnection' $MAIN --include='*.kt' | grep -vE '/(agent|ssh|notify)/|superserver/net/'"
+  bash -c "! grep -rnE '\bSocket\s*\(|HttpURLConnection|openConnection' $MAIN --include='*.kt' | grep -vE '/(agent|ssh|notify)/|superserver/net/|mesh/net/|mesh/android/'"
 
 # 28. no private key material is committed; keys are generated on the device
 check "no committed private key material" \
@@ -233,7 +233,7 @@ check "a refused forward is a distinct failure" \
 # 40. a one-way grant (D77) has no address, so it is never dialled, and the
 #     grant path cannot mint an operator: a stored peer is always a Peer.
 check "an inbound-only grant is never dialled" \
-  bash -c "grep -q 'PEER_NO_ADDRESS' $MAIN/cluster/PeerClient.kt && grep -q 'fun isInboundOnly' $MAIN/cluster/PeerRecord.kt && grep -q 'isInboundOnly()' $MAIN/cluster/FleetService.kt && grep -q 'fun grant(' $MAIN/cluster/PeerStore.kt && ! grep -q 'Principal.Operator' $MAIN/cluster/PeerStore.kt && grep -q 'Principal.Peer(peer.nodeId, peer.grantedByMe)' $MAIN/cluster/FleetService.kt"
+  bash -c "grep -q 'PEER_NO_ADDRESS' $MAIN/cluster/PeerClient.kt && grep -q 'fun isInboundOnly' $MAIN/cluster/PeerRecord.kt && grep -q 'isInboundOnly()' $MAIN/cluster/FleetService.kt && grep -q 'fun grant(' $MAIN/cluster/PeerStore.kt && ! grep -q 'Principal.Operator' $MAIN/cluster/PeerStore.kt && grep -q 'Principal.Peer(peer.nodeId, peer.grantedByMe, peer.services)' $MAIN/cluster/FleetService.kt"
 
 # 41. the hub roster names devices and nothing else (D78): a port, an address
 #     or a key in that projection would let the roster file leak the topology.
@@ -285,7 +285,7 @@ check "the doctor block is three fields and stays out of the exports" \
 #     kept its own literal that nobody bumped. The runtime must therefore report
 #     the SDK constant and carry no numeric literal of its own.
 check "the runtime reports the SDK's API version, not its own literal" \
-  bash -c "grep -q 'override fun apiVersion(): Int = GromClient.API_VERSION' $MAIN/ServerRuntime.kt && ! grep -qE 'override fun apiVersion\(\): Int = [0-9]' $MAIN/ServerRuntime.kt && grep -q 'const val API_VERSION: Int = 10' sdk/src/main/java/app/grom/sdk/GromClient.kt"
+  bash -c "grep -q 'override fun apiVersion(): Int = GromClient.API_VERSION' $MAIN/ServerRuntime.kt && ! grep -qE 'override fun apiVersion\(\): Int = [0-9]' $MAIN/ServerRuntime.kt && grep -q 'const val API_VERSION: Int = 11' sdk/src/main/java/app/grom/sdk/GromClient.kt"
 
 # 49. a phone can hold two Groms (D85). The embedding host must be able to pick
 #     the loopback control port, and a port that is taken must be reported as
@@ -403,6 +403,54 @@ check "the ai catalogue is published only under ai read and nothing polls" \
 #     with this exact argv.
 check "the agent argv carries no unproven engine switch" \
   bash -c "! grep -qE '\"--experimental-' $MAIN/agent/AgentLauncher.kt && grep -q 'runtime.script.absolutePath' $MAIN/agent/AgentLauncher.kt && grep -q 'launch_probe' scripts/build-node-android.sh && grep -q 'GROM_AGENT_READY' scripts/build-node-android.sh"
+
+# 66. the mesh's decisions are pure Kotlin and its adapters are isolated (D99).
+#     Only `mesh/android/` may import android.*, only `mesh/net/` may open a
+#     socket, and the core (book, policy, caller, documents) holds neither.
+check "mesh policy and discovery are pure, adapters are isolated" \
+  bash -c "! grep -rn '^import android\.' $MAIN/mesh --include='*.kt' | grep -v '/mesh/android/' && [ \$(ls $MAIN/mesh/android/*.kt | wc -l) -eq 1 ] && ! grep -rnE '\bSocket\s*\(|HttpURLConnection|openConnection' $MAIN/mesh --include='*.kt' | grep -vE '/mesh/net/|/mesh/android/' && grep -q 'class LanBeaconNode' $MAIN/mesh/net/LanBeaconNode.kt"
+
+# 67. discovery is opt-in, bounded, and stops with the service (D99, D103).
+#     The book has a cap and a TTL, the runtime stops the mesh with the server,
+#     and the package schedules nothing on its own.
+check "discovery is opt-in, bounded and stops with the server" \
+  bash -c "grep -q 'val enabled: Boolean = false' $MAIN/mesh/MeshSettings.kt && grep -q 'MAX_CANDIDATES' $MAIN/mesh/MeshModels.kt && grep -q 'CANDIDATE_TTL_MS' $MAIN/mesh/MeshModels.kt && grep -q 'fun stop()' $MAIN/mesh/MeshService.kt && grep -q 'runCatching { mesh.stop() }' $MAIN/ServerRuntime.kt && ! grep -rqE 'postDelayed|ScheduledExecutor|scheduleAtFixedRate' $MAIN/mesh"
+
+# 68. the LAN beacon is signed and time-bounded, and BLE is discovery only
+#     (D99). A beacon is a name tag: the signature stops a sender claiming
+#     somebody else's node id, the timestamp stops an old capture from keeping a
+#     dead phone "nearby", and the eight-byte payload cannot carry a request.
+check "a LAN beacon is signed and BLE carries no data" \
+  bash -c "grep -q 'Ed25519.verify' $MAIN/mesh/MeshBeacon.kt && grep -q 'MAX_SKEW_SECONDS' $MAIN/mesh/MeshBeacon.kt && grep -q 'BLUETOOTH_LE(\"bluetooth_le\", false)' $MAIN/mesh/MeshModels.kt && grep -q 'PAYLOAD_BYTES: Int = 8' $MAIN/mesh/BleAdvertisement.kt && grep -q 'signedBeacon = false' $MAIN/mesh/android/AndroidMeshRadios.kt"
+
+# 69. the roster has no endpoint, the relay has its own scope and the operator's
+#     per-peer share list is enforced (D59, D100, D101).
+check "the mesh roster has no endpoint and shares are enforced" \
+  bash -c "grep -q 'MESH_READ(\"mesh.read\")' $MAIN/cluster/PeerRecord.kt && grep -q 'MESH_CALL(\"mesh.call\")' $MAIN/cluster/PeerRecord.kt && grep -q 'PeerScope.MESH_CALL' $MAIN/superserver/SuperRouter.kt && grep -q 'SERVICE_NOT_SHARED' $MAIN/superserver/SuperRouter.kt && grep -q 'serviceAllowed(principal, plugin.id)' $MAIN/superserver/SuperRouter.kt && grep -q 'services.isEmpty() ||' $MAIN/superserver/SuperRouter.kt && ! sed -n '/override fun document()/,/^    }/p' $MAIN/mesh/MeshService.kt | grep -q 'nearby' && grep -q 'includeAddress' $MAIN/mesh/MeshDocuments.kt && ! grep -q '/v1/mesh' $MAIN/superserver/SuperStatusDocument.kt $MAIN/superserver/ConfigExport.kt $MAIN/cluster/FleetStatus.kt"
+
+# 70. Bluetooth Classic is the secure RFCOMM carrier and reuses the shared wire
+#     codec (D102). No insecure socket, no unbonded link, no second request
+#     format.
+check "bluetooth classic is secure rfcomm over the shared wire codec" \
+  bash -c "grep -q 'createRfcommSocketToServiceRecord' $MAIN/mesh/android/AndroidMeshRadios.kt && ! grep -q 'listenUsingInsecureRfcomm' $MAIN/mesh/android/AndroidMeshRadios.kt && ! grep -q 'createInsecureRfcommSocket' $MAIN/mesh/android/AndroidMeshRadios.kt && grep -q 'BOND_BONDED' $MAIN/mesh/android/AndroidMeshRadios.kt && grep -q 'HttpWire.writeRequest' $MAIN/mesh/net/BluetoothJsonTransport.kt && grep -q 'class RoutingJsonTransport' $MAIN/mesh/net/RoutingJsonTransport.kt"
+
+# 71. the mesh's permissions stay inside the agreed budget: nearby devices only,
+#     no background location, no microphone, no phone state. Both radio
+#     features are optional so a phone without them still installs.
+check "mesh permissions stay inside the agreed budget" \
+  bash -c "grep -q 'BLUETOOTH_SCAN' $MANIFEST_ENGINE && grep -q 'neverForLocation' $MANIFEST_ENGINE && grep -q 'NEARBY_WIFI_DEVICES' $MANIFEST_ENGINE && grep -q 'android.hardware.bluetooth_le\" android:required=\"false\"' $MANIFEST_ENGINE && grep -q 'android.hardware.wifi.direct\" android:required=\"false\"' $MANIFEST_ENGINE && ! grep -rqE 'ACCESS_BACKGROUND_LOCATION|RECORD_AUDIO|READ_PHONE_STATE|QUERY_ALL_PACKAGES' $MANIFEST_ENGINE"
+
+# 72. the server-network screen is a pure model (D30) and every stable code it
+#     can show is documented for the operator (D99-D103).
+check "the mesh screen is pure and its codes are documented" \
+  bash -c '! grep -q "^import android\." app/src/main/java/app/grom/server/ui/MeshModel.kt && for code in MESH_DISABLED MESH_PERMISSION_REQUIRED MESH_NO_ADDRESS MESH_UNREACHABLE MESH_UNAUTHORIZED MESH_SCOPE_NOT_GRANTED MESH_UNKNOWN_SERVER MESH_UNKNOWN_SERVICE MESH_OP_NOT_ALLOWED MESH_REDIRECTED MESH_PAYLOAD_TOO_LARGE MESH_BAD_RESPONSE SERVICE_NOT_SHARED; do grep -q "$code" docs/MESH.md || { echo "undocumented: $code"; exit 1; }; done'
+
+# 73. a pairing carries peer grants only, and the mesh pairing asks for the
+#     service scopes it actually needs (D104). `mesh.read`/`mesh.call` are
+#     local-client grants; handing one to another device would put a permission
+#     the other operator cannot interpret in front of the approval screen.
+check "a pairing grants peer scopes only, and the mesh asks for services" \
+  bash -c "grep -q 'val PEER_GRANTABLE' $MAIN/cluster/PeerRecord.kt && ! sed -n '/val PEER_GRANTABLE/,/)/p' $MAIN/cluster/PeerRecord.kt | grep -q 'MESH_' && grep -q 'PEER_GRANTABLE' $MAIN/cluster/FleetService.kt && grep -q 'PEER_GRANTABLE' $MAIN/cluster/Pairing.kt && grep -q 'val PEER_GRANTABLE' $MAIN/cluster/PeerRecord.kt && grep -q 'PAIR_SERVICES_CALL' app/src/main/java/app/grom/server/ui/MeshModel.kt && grep -q 'fun pairScopes' app/src/main/java/app/grom/server/ui/MeshModel.kt && grep -q 'grantedByMe = scopes' $MAIN/cluster/PeerStore.kt"
 
 echo
 TOTAL=$((PASS + FAIL))

@@ -1622,3 +1622,135 @@ launcher until such a flag is proven against the pinned runtime.
 
 *Enforced by:* `AgentLauncherTest` (six-element argv, no `--experimental-`),
 `scripts/build-node-android.sh --verify` (a real launch), `tools/test-policy` #65.
+
+## D99 — the mesh is discovery, a roster and a relay over the existing API
+**ACCEPTED.** A "server network" of phones needs three things and no new server:
+a way to hear that another Grom is nearby, a scored roster of what it serves, and
+a way to call it. None of those require a second protocol. Every call the mesh
+makes is the data plane's own `/grom/v1/connect`, `/v1/plugins/{id}/rpc` or
+`/v1/ai/*`, signed with this device's Ed25519 identity and verified by the same
+`RequestSigner`. A mesh call is an ordinary peer call with a different reason.
+
+The carriers are chosen by what they can do, not by fashion. LAN (and a VPN above
+it) is ordinary TCP and preferred. Wi-Fi Direct gives a group owner IP and a
+DNS-SD service record. Bluetooth Classic carries HTTP/1.1 over a secure RFCOMM
+stream (`bt://<MAC>`). BLE is **discovery only**: eight bytes are a name tag, and
+pretending a BLE link is a data plane would be the kind of claim this project
+does not make. A BLE-only sighting has no endpoint and the screen says so.
+
+Discovery is a sixth documented outbound path (S1-R003 amendment): an opt-in UDP
+beacon to one fixed link-local multicast group, a BLE advertisement, a Wi-Fi
+Direct service and an RFCOMM link. It is off by default, it starts and stops with
+the server, and it never dials an arbitrary host. All RPC still goes through the
+shared transport.
+
+*Enforced by:* `MeshIntegrationTest` (real sockets), `MeshRouterTest`,
+`tools/test-policy` #66/#67.
+
+## D100 — a server-to-server call uses the peer's scopes, never an operator key
+**ACCEPTED.** The relay at `POST /v1/mesh/call` is gated by its own `mesh.call`
+scope, which is separate from `services.call`: using a local service and
+borrowing this device's federation are different decisions. The roster at
+`GET /v1/mesh` needs `mesh.read`, and it carries no endpoint — not a host, not a
+port, not a MAC. An address is operator state, returned only over the
+signature-gated Binder, because the operator is the one who approved it.
+
+The call itself runs under this device's identity, so the target applies exactly
+the scopes and shares it granted this device. The relay checks the obvious
+things first — paired server, published service, published op, held scope — so a
+misconfiguration is a local, stable code and not a remote 403 storm. The peer
+checks them all again; neither side trusts the other's decision.
+
+*Enforced by:* `MeshCallerTest`, `MeshRouterTest`, `MeshIntegrationTest`
+(revoked key, unlisted op), `tools/test-policy` #69.
+
+## D101 — services are shared per peer, and the empty list is the old behaviour
+**ACCEPTED.** Until now a paired device with `services.call` could use every
+operation every service published. That was the right default for one trusted
+app; it is too wide for a network of phones. `PeerRecord.services` adds an
+operator-chosen allow-list by plugin id. An empty list keeps the pre-D101
+meaning — everything the scopes already allow — so no existing pairing changes
+behaviour, and the UI treats "all ticked" as the same empty list. A non-empty
+list is a hard filter in the router: the service is hidden from that peer's
+listing and refused with `SERVICE_NOT_SHARED`.
+
+The list is read live with the record, so a change applies to the next request
+without a restart (D54). It is validation-checked at write time: a name this
+device does not serve is refused, and a malformed id cannot be stored.
+
+*Enforced by:* `PeerSharesTest`, `MeshRouterTest` (hidden listing),
+`MeshIntegrationTest` (404/403 after a share change), `tools/test-policy` #69.
+
+## D102 — Bluetooth Classic is secure RFCOMM carrying the same HTTP request
+**ACCEPTED.** Android's public Wi-Fi Direct and BLE APIs have no service payload
+large enough for a request, and Classic has no advertisement Grom can filter on.
+Classic therefore has one job: a byte pipe. `bt://<MAC>` opens
+`createRfcommSocketToServiceRecord` — the authenticated, encrypted variant that
+requires a bonded device — and the mesh writes the same HTTP/1.1 request and reads
+the same response. There is no insecure variant, no automatic reconnection and no
+streaming: an SSE answer has no length and would never end.
+
+One routing transport dispatches `http(s)` to the client the peer probe already
+used and `bt` to this stream carrier. The stream codec is tested on the JVM over
+a real loopback socket (the "RFCOMM link" is a duplex stream), so a wrong request
+line, header or body length fails in CI rather than on a phone.
+
+*Enforced by:* `BluetoothJsonTransportTest`, `HttpWireTest` (which drives
+`RoutingJsonTransport`), `MeshCallerTest` (bt path), `tools/test-policy` #70.
+
+## D103 — discovery is untrusted, bounded and on demand
+**ACCEPTED.** Every discovery carrier can be spoofed by anyone in radio range: a
+signed LAN beacon only proves the sender holds the key it names (which stops it
+claiming *your* node id), a BLE prefix collides, a Wi-Fi Direct service record is
+whatever the group owner published. The mesh therefore never turns a sighting
+into trust: the book is bounded (32 entries), expires (120 s) and is only a list
+of hints. The operator pairs, compares fingerprints and chooses scopes.
+
+Nothing polls. The roster refreshes when the section opens, when Refresh is
+tapped or after an action; the only periodic work is the beacon, and only while
+advertising is on. A disabled mesh answers `MESH_DISABLED` and the rest of the
+server is untouched.
+
+*Enforced by:* `DiscoveryBookTest`, `MeshSettingsTest`, `MeshServiceTest`,
+`tools/test-policy` #67/#68.
+
+## D104 — a pairing carries peer grants, and the mesh asks for them explicitly
+**ACCEPTED.** Until now every pairing requested exactly `status.read` and
+`config.read`. That is enough to *see* another device and nothing else, so the
+server network's first real use — see what the other phone serves, then call one
+of its services — could not be reached from the screens at all: the roster said
+`MESH_SCOPE_NOT_GRANTED` and every call was refused. The feature existed in the
+engine and in the tests, but not in the product.
+
+The fix is not to widen the default. `Devices` keeps asking for the same two
+scopes, and the server network's pairing dialog adds `services.read` and
+`services.call`, unticked only if the operator says so. The accepting operator
+sees the same list before approving *(the pairing is symmetric, D73)*. A pairing
+now carries a subset of a **peer-grantable** set: `status.read`, `config.read`,
+`services.read`, `services.call`, `ai.read`, `ai.chat`. `mesh.read` and
+`mesh.call` are grants this phone gives its own applications; handing one to
+another device would put a permission the other operator cannot interpret in
+front of the approval screen, so both the joining request and the accepting
+endpoint refuse it.
+
+Two smaller corrections travel with it, both found while making the flow work:
+
+- `PeerStore.grant` used to replace a record wholesale. Granting scopes to a key
+  that was **already paired** therefore dropped its address and made it
+  inbound-only — a paired server that could never be called again while the
+  screen still listed it as paired. A grant to an existing record now replaces
+  only `grantedByMe` (and the label) and keeps the endpoint, the other side's
+  grants and the pairing time.
+- The mesh screen requests the Bluetooth/Wi-Fi-Direct runtime permissions before
+  enabling discovery or scanning. Without that, the engine could only report
+  `MESH_PERMISSION_REQUIRED` and the operator had no way to grant it from the
+  app.
+
+A pairing still grants exactly what it says: a service also has to be shared
+before it can be called (D101), and `services.call` with an empty share list is
+the established "everything its scopes allow" default, which the share dialog
+shows in words.
+
+*Enforced by:* `PairingTest` (a hello asking for `mesh.call` is refused),
+`PeerGrantTest` (a grant keeps the endpoint), `MeshModelTest` (`pairScopes`),
+`tools/test-policy` #73, S8-R015.

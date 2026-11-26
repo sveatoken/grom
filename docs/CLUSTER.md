@@ -178,3 +178,15 @@ a pure function over an `HttpRequest`, so the scope matrix needs no socket.
 `tools/test-policy` #34–#41 pin the socket surface, the sealed seed, the pairing
 bounds, the scope gate, the one-way grant and the hub roster. `PeerGrantTest`
 covers the inbound-only path end to end at the model level.
+
+## Server network (mesh)
+
+The fleet tools in this document describe **operator-side** views: a VPS that
+polls paired phones. Since v0.18.0 a phone can also be a member of a **server
+network**: it discovers another Grom (signed LAN beacon, BLE advertisement,
+Wi-Fi Direct, bonded Bluetooth Classic), pairs with it through the same
+fingerprint ceremony, and calls a service the other server publishes, with a
+per-peer service allow-list. Discovery is opt-in, untrusted and bounded; the
+roster carries no address; and every call is the existing signed HTTP API, not a
+new protocol. See [`MESH.md`](MESH.md) and
+[`specs/S8-server-mesh.md`](specs/S8-server-mesh.md) (D99–D103).

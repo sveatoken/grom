@@ -539,3 +539,22 @@ MUST contain a provider endpoint or a key. Streaming answers MUST use
 `SuperResponse.Stream` on the existing listener with
 `Content-Type: text/event-stream`, MUST decide every pre-flight refusal before
 writing the head, and MUST stop reading the provider when the client disconnects.
+
+### S5-R062 — the mesh roster is address-free
+`GET /v1/mesh` MUST require `mesh.read` and MUST NOT contain any endpoint,
+port, MAC, key or tunnel address. Unpaired candidates MUST NOT be listed there;
+they are an operator view only. A server entry MUST report `servicesListed`
+truthfully and MUST expose `catalogError` as a stable code, never an address.
+
+### S5-R063 — the relay has its own scope and a closed target set
+`POST /v1/mesh/call` MUST require `mesh.call`, MUST accept only a node id that
+is paired in `PeerStore`, and MUST refuse a service the peer did not publish or
+an operation it did not expose. It MUST NOT follow a redirect, MUST reject a
+body over 64 KiB, and MUST NOT place the peer's address or key in an error.
+
+### S5-R064 — services are shared per peer
+A `PeerRecord.services` allow-list MUST be applied by the router as a hard
+filter: an unshared service MUST NOT appear in that peer's service listing and
+MUST be refused with `403 SERVICE_NOT_SHARED`. An empty list MUST mean "every
+operation the peer's scopes already allow", preserving pre-D101 behaviour. The
+list MUST be validated when written and read live on every request.

@@ -10,8 +10,9 @@ Normative requirements for Grom F1. IDs are stable; do not renumber.
 > decides no payment, and the Lightning adapter (D43) only forwards to an
 > operator-configured backend. `S1-R003` is narrowed by D48 and D65: the process
 > may open a connection to a backend URL the operator supplied at runtime and
-> must never compile one in, and it may post an operator-enabled notification to
-> the single notification host (S1-R038). `S1-R010` applies unchanged to the control plane; for the
+> must never compile one in, it may post an operator-enabled notification to
+> the single notification host (S1-R038), and it may run the opt-in server-network
+> discovery described in S1-R049 (D99–D103). `S1-R010` applies unchanged to the control plane; for the
 > data plane the bind is chosen by `SuperBindPolicy`, and a non-loopback choice
 > requires a credential and, for the wildcard, an explicit acknowledgement
 > (D41). No other S1 requirement changes.
@@ -30,7 +31,7 @@ balance, no account, no settlement, no payment credential.
 ### S1-R003
 Grom MUST NOT initiate an outbound connection to the internet on its own. There
 is no telemetry, analytics or crash reporting. Outbound connections are limited
-to five explicit, operator-initiated cases:
+to six explicit, operator-initiated cases:
 
 1. the update check (S1-R033): one HTTPS GET to the public release feed, only
    after the operator asks for it;
@@ -46,7 +47,14 @@ to five explicit, operator-initiated cases:
 5. a request to a **paired device** (D75): a signed HTTP request to the address
    the operator typed during pairing and that is stored in `PeerStore`, made
    only when the operator joins or refreshes the fleet. No host is compiled in,
-   and the client uses the shared transport (S1-R040).
+   and the client uses the shared transport (S1-R040). The same path carries a
+   server-to-server call to a paired device (D100), including a Bluetooth
+   Classic carrier (`bt://<MAC>`, D102);
+6. **server-network discovery** (S1-R049, D99): while the operator has enabled
+   it, one signed UDP beacon to a fixed link-local multicast group, a BLE
+   advertisement of eight bytes, a Wi-Fi Direct DNS-SD record, and an RFCOMM
+   listener for bonded devices. None of these opens a connection to an arbitrary
+   host, and none carries a request.
 
 The VPS hub (D76) is an **operator-run tool outside the APK**; it adds no
 outbound case to Grom, because the phone never connects to it. The hub connects
@@ -266,10 +274,14 @@ fingerprint comparison on both screens. No automatic approval path may exist and
 nothing may be stored before both confirmations.
 
 ### S1-R042
-A paired device MUST be limited to the scopes granted at pairing
-(`status.read`, `config.read`). A revoked pairing MUST stop verifying on the next
-request. The operator's own session and keys MUST keep their previous,
-unrestricted behaviour unless the host explicitly maps a key to a peer.
+A paired device MUST be limited to the scopes granted at pairing. Those scopes
+MUST come from the peer-grantable set (`status.read`, `config.read`,
+`services.read`, `services.call`, `ai.read`, `ai.chat`); a local-client grant
+(`mesh.read`, `mesh.call`) MUST be refused on both the joining and the accepting
+side, because it names a permission the other operator cannot use (D104). A
+revoked pairing MUST stop verifying on the next request. The operator's own
+session and keys MUST keep their previous, unrestricted behaviour unless the host
+explicitly maps a key to a peer.
 
 ### S1-R043
 A paired-device address MUST NOT appear in `GET /v1/status`, in
@@ -335,3 +347,12 @@ rest, MUST NOT appear in any status, export, error or log, and MUST NOT be
 readable through any scope: `ai.read` and `ai.chat` grant the catalogue and the
 completion, never the credential. The gateway MUST NOT poll, probe in the
 background, or contact any host merely because it is configured.
+
+### S1-R049 (D99–D103)
+Server-network discovery MUST be **off by default**, MUST start and stop with
+the server, and MUST be limited to the four carriers above. A discovery sighting
+MUST NOT create a peer: only the pairing handshake (S1-R041) does. A LAN beacon
+MUST be signed and timestamped and MUST be rejected outside a 120-second skew.
+A BLE advertisement MUST NOT carry a request. Every discovery carrier MUST be
+treated as untrusted input: the candidate book MUST be bounded and MUST expire.
+Discovery MUST NOT cause the public data plane to bind a non-loopback address.

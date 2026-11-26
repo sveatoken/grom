@@ -22,6 +22,10 @@ GET  /v1/plugins               → services and their callable ops   (services.r
 POST /v1/plugins/{id}/rpc      → call one op                       (services.call)
 GET  /v1/status                → measured status                   (status.read)
 GET  /v1/config                → sanitised configuration export    (config.read)
+GET  /v1/ai/models             → the operators' AI catalogue        (ai.read)
+POST /v1/ai/chat/completions   → one chat request                   (ai.chat)
+GET  /v1/mesh                  → paired servers, address-free       (mesh.read)
+POST /v1/mesh/call             → relay one call to a paired server  (mesh.call)
 ```
 
 A client is an ordinary HTTP/JSON client. It is never an operator: a connected
@@ -210,6 +214,10 @@ The available scopes are:
 | `config.read` | `GET /v1/config` (the sanitised export) |
 | `services.read` | `GET /v1/plugins`, `GET /v1/plugins/{id}`, service listing in `connect` |
 | `services.call` | `POST /v1/plugins/{id}/rpc`, limited to `scopedOps` |
+| `ai.read` | `GET /v1/ai/models`, the `ai` block in `connect` |
+| `ai.chat` | `POST /v1/ai/chat/completions`, `POST /v1/ai/v1/messages` |
+| `mesh.read` | `GET /v1/mesh` (the server network, address-free) |
+| `mesh.call` | `POST /v1/mesh/call`, limited to servers this device has paired and services they publish |
 
 Any other route — `/v1/events`, `/v1/auth/logout`, pairing, the control plane —
 answers `403 SCOPE_REQUIRED` for a peer. A client that needs more than these
@@ -383,7 +391,48 @@ require it: the `ai` service publishes no `scopedOps`, and its operations are
 gated by `ai.read`/`ai.chat`. A client MUST NOT ask the operator for an operator
 token to make an AI request.
 
-## 13. Out of scope
+## 13. The server network (D99)
+
+A Grom may be paired with other Groms. A scoped client can see that network and
+relay one call through it, but it never learns where the other phones are and
+never gets a key.
+
+### S6-R033
+`GET /grom/v1/connect` carries a `mesh` block (`enabled`, the two route paths
+and the two required scopes). It is discovery only: a client MUST read it before
+offering a "use another server" feature, and MUST NOT assume the network is
+enabled.
+
+### S6-R034
+`GET /v1/mesh` (`mesh.read`) returns the paired servers: `nodeId`, `label`,
+`fingerprint`, the measured `state`, the transports each was seen on, the scopes
+in both directions, the services that server publishes and its AI models. It
+contains **no endpoint** — an app that may read the roster still cannot reach the
+other server directly (S5-R062). `state` is a measurement, not a promise: only
+`alive` may be painted green.
+
+### S6-R035
+`POST /v1/mesh/call` (`mesh.call`) with
+`{"server":"<node id>","service":"<id>","op":"<op>","args":{…}}` relays one call
+through this device. The body answers
+`{"ok":true,"server":…,"service":…,"op":…,"status":<peer status>,"result":…}`.
+`service:"ai"` with `op:"models"|"chat"|"messages"` and a `body` object reaches
+the peer's AI gateway instead of a plugin.
+
+A client MUST handle these codes, all of which mean "the network refused", never
+"retry harder": `MESH_DISABLED`, `MESH_UNKNOWN_SERVER`, `MESH_UNKNOWN_SERVICE`,
+`MESH_OP_NOT_ALLOWED`, `MESH_NO_ADDRESS`, `MESH_UNREACHABLE`,
+`MESH_UNAUTHORIZED`, `MESH_SCOPE_NOT_GRANTED`, `MESH_REDIRECTED`,
+`MESH_PAYLOAD_TOO_LARGE`, `MESH_BAD_RESPONSE`, and the peer's own
+`SERVICE_NOT_SHARED`.
+
+### S6-R036
+`mesh.call` is a relay grant and is deliberately **not** implied by
+`services.call`: using a service on this device and borrowing this device's
+federation are two decisions. Neither scope is an operator key, and neither can
+be carried by a pairing (S1-R049, D104).
+
+## 14. Out of scope
 
 * **MCP** — not implemented. `/v1/plugins/{id}/rpc` already carries the same
   capability description and call shape; an MCP adapter can be a separate,
@@ -391,6 +440,9 @@ token to make an AI request.
 * **WebSocket / SSE for scoped clients** — `/v1/events` stays operator-only.
 * **Dynamic plugin loading** — the registry is built in code (S5-R020), and a
   client cannot introduce a service.
-* **Cloud accounts, registration, discovery beacons** — D70, S1-R004. The
-  address comes from the operator, the tunnel or the provider's own tool.
+* **Cloud accounts and registration** — D70, S1-R004. The address comes from
+  the operator, the tunnel or the provider's own tool.
+* **Discovery on behalf of a client** — the mesh's radios belong to the server
+  and are switched on by its operator (D99, D103). A client cannot ask a Grom to
+  start scanning, advertise, or pair with somebody.
 * **TLS** — D47. The data plane is plain HTTP; use a trusted network or a tunnel.

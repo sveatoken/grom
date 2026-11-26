@@ -22,6 +22,7 @@ Task ids (`T-nn`) match §U of the master plan.
 | **1J — "2 in 1": host-chosen control port, host-configured data plane, a lean peripheral** | **done** | `core/ControlPort` + `GromEmbed.Options.controlPort` (D85), `superSaveConfig` API 9 + `SuperServerConfigInput` (D86), peripheral `jniLibs` exclusion (D87), `docs/TWO-IN-ONE.md`; `tools/check-flavours` |
 | **1K — "2 in 1" without complications: versioned consent, an automatic port, host-readable health** | **done** | `EmbedConsent` (D88), `ControlPort.resolve` + `GromEmbed.AUTO_PORT` (D89), `EmbedHealth` projection + `GromEmbed.health` (D90), `GromClient.bind(createIfMissing=false)` and a released registration after `onNullBinding`; `docs/TWO-IN-ONE.md` §2, §9 |
 | **1L — universal client connect: discovery, scoped services, a thin SDK** | **done** | `GET /grom/v1/connect` (D91), `services.read`/`services.call` + `Plugin.scopedOps` (D92), `app.grom.sdk.connect` HTTP client + compiled `examples/connect` (D93); `docs/specs/S6-client-connect.md` |
+| **1M — server network: discovery, a roster and scoped server-to-server calls** | **done** | `GET /v1/mesh` + `POST /v1/mesh/call` (D99, D100), per-peer service shares (D101), LAN beacon + BLE advert + Wi-Fi Direct DNS-SD + secure RFCOMM `bt://` (D102), untrusted bounded discovery (D103); `docs/MESH.md`, `docs/specs/S8-server-mesh.md`; API **11** |
 | **1B — core hardening** | **next** | `apps/AppManifest.kt`, `apps/PortAllocator.kt`, `apps/HealthGate.kt`, `apps/ReleaseStore.kt`, `proc/ChildProcess.kt`, `adapters/`, `auth/Scope.kt` — none exist yet |
 | **2 — Application Manager MVP** | **blocked by 1B** | `apps/ApplicationManager.kt`, `apps/AppSupervisor.kt`, the gateway, `/v1/apps` |
 | **3 — runtimes and adapters** | blocked by 2 | `apps/runtime/`, `adapters/`, LND |
@@ -29,7 +30,7 @@ Task ids (`T-nn`) match §U of the master plan.
 | **5 — backup, CLI, advanced** | blocked by 4 | `backup/`, `cli/` |
 | **6 — production** | blocked by 5 | signing key, soak, review |
 
-Current version: `0.15.0` (versionCode 15). The thirteen gates in `tools/run-gates`
+Current version: `0.18.0` (versionCode 19). The thirteen gates in `tools/run-gates`
 are the baseline; every phase below adds tests, not gates that replace them.
 
 **The next concrete action** is T-01 (`apps/AppManifest.kt`), because every later
@@ -682,3 +683,39 @@ six-element argv, policy #65 keeps unproven engine switches out, and
 launcher's exact argv and waits for readiness, so this class of defect fails a
 gate instead of a phone.
 
+### Phase 1M — the server network — **done**
+
+Several phones, each a complete Grom, that can find each other, see what the
+others serve and call one of those services — while every phone stays
+independent. There is no second server: the mesh adds discovery (D99/D103), a
+roster (D100) and a relay (D100), and every call is the existing signed HTTP
+API.
+
+- **Discovery is a hint, never trust.** A signed LAN beacon (Ed25519 over node
+  id, port, timestamp and nonce, ±120 s) proves only that the sender holds the
+  key it names; a BLE advertisement is eight unsigned bytes and carries no
+  request; a Wi-Fi Direct DNS-SD record is chosen by the group owner; a bonded
+  Classic link proves only that Android paired once. Pairing remains the only
+  trust path, and the book of sightings is bounded (32) and expires (120 s).
+- **Carriers by capability.** LAN/VPN over TCP, Wi-Fi Direct group-owner IP,
+  Bluetooth Classic as secure RFCOMM carrying the same HTTP/1.1
+  (`bt://<MAC>`), and BLE for discovery only. No new request format.
+- **A scoped relay.** `GET /v1/mesh` needs `mesh.read` and carries no endpoint;
+  `POST /v1/mesh/call` needs `mesh.call`, a paired target and an operation the
+  target published. The peer applies its own scopes and its operator's
+  per-peer service allow-list (D101, empty = the old behaviour).
+- **No polling.** The roster refreshes on open, on Refresh or after an action;
+  the only periodic work is the opt-in beacon.
+
+Gate: `tools/run-gates` **13/13**, policy **73/73** (#66–#73), `MeshBeaconTest`
+**4**, `BleAdvertisementTest` **4**, `DiscoveryBookTest` **5**,
+`MeshSettingsTest` **6**, `MeshCatalogTest` **5**, `MeshCallerTest` **12**,
+`MeshDocumentsTest` **3**, `HttpWireTest` **7**, `BluetoothJsonTransportTest`
+**4**, `LanBeaconNodeTest` **3**, `MeshRouterTest` **5**, `MeshServiceTest` **4**,
+`PeerSharesTest` **6**, `MeshIntegrationTest` **6** (two and three real servers
+over real loopback sockets), `MeshModelTest` **7**, plus the updated
+menu/contract tests; lint 0/0.
+
+Not closed: no physical phone has run the radios; Wi-Fi Direct groups with more
+than one Grom server need a real service record; BLE never carries data; and the
+mesh adds no background watching.

@@ -1012,13 +1012,22 @@ The plan says this plainly instead of inventing a bespoke encrypted transport: a
 hand-rolled Noise-like layer in a Kotlin app is exactly what looks secure and is
 not. `[DECISION]` if a built-in transport is ever wanted.
 
-### M.5 Discovery
+### M.5 Discovery — implemented as the server network (D99–D103)
 
-Android NSD announces `_grom._tcp` with the node id and data-plane port. Discovery
-is a **hint**: it fills "nearby devices", selecting one starts pairing, and a
-discovered node with no pairing shows as `unpaired`. It never grants access and
-never auto-pairs. A manual "add by address" path exists for networks that block
-multicast, which is most hotel and corporate Wi-Fi.
+The first increment of this section shipped in v0.18.0 as the **server network**
+(`docs/MESH.md`, `docs/specs/S8-server-mesh.md`): a signed LAN beacon, a BLE
+advertisement, Wi-Fi Direct DNS-SD and a bonded Bluetooth Classic carrier, each
+producing a **candidate** that only the existing pairing handshake can turn into
+a peer. The roster and the relay (`/v1/mesh`, `/v1/mesh/call`) are scoped and
+address-free, and a peer's services are shared per peer (D101).
+
+Android NSD remains the intended LAN discovery mechanism for the broader plan;
+the beacon exists because it is testable on the JVM and because it needs no
+platform service. Discovery is a **hint**: it fills "nearby devices", selecting
+one starts pairing, and a discovered node with no pairing shows as `unpaired`.
+It never grants access and never auto-pairs. A manual "add by address" path
+exists for networks that block multicast, which is most hotel and corporate
+Wi-Fi. There is still no cloud directory and no background watching.
 
 ### M.6 Placement: explicit, not scheduled
 

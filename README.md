@@ -23,7 +23,7 @@ grom/
 ├── examples/connect/       the compiled Kotlin client example (S6)
 ├── testapps/               samecert / foreigncert — the C-008 evidence
 ├── web/                    the static download page (GitHub Pages, D49)
-├── docs/                   000-decisions, specs S1–S7, F1 plan, master plan, roadmap, guides
+├── docs/                   000-decisions, specs S1–S8, F1 plan, master plan, roadmap, guides
 ├── tools/                  gates, plus grom-fleet, grom-hub and grom-provision
 ├── scripts/                test keys and the arm64 Node runtime pipeline
 ├── third_party/            the dependency ledger
@@ -67,6 +67,8 @@ second process (D58).
 | Client connect (S6) | **delivered in code** — `GET /grom/v1/connect`, `services.read`/`services.call` with per-op allow-lists, a dependency-free Kotlin client and a compiled example (D91–D93) |
 | AI gateway | **delivered in code** — one local AI API over your own keys: OpenAI/Anthropic/Gemini protocols, seven vendor presets plus any custom endpoint, a sealed-key store, a model catalogue, OpenAI- and Anthropic-compatible routes with streaming, `ai.read`/`ai.chat` scopes, API 10; guide in `docs/AI.md`, contract in `docs/specs/S7-ai-gateway.md` (D94–D97) |
 | AI gateway against a live provider | **open** — every shape is proven against a real loopback provider and fakes; a live vendor call needs the operator's own key (`GROM_AI_LIVE_*`) |
+| Server network (mesh) | **delivered in code** — signed LAN beacon, BLE and Wi-Fi Direct discovery, Bluetooth Classic as a secure RFCOMM carrier, an address-free roster, a scoped relay to another phone's services and AI gateway, API 11; guide in `docs/MESH.md`, contract in `docs/specs/S8-server-mesh.md` (D99–D104) |
+| Server network on a device | **open** — no physical phone has run the Bluetooth or Wi-Fi Direct radios; two and three servers are proven over real loopback sockets |
 
 When the runtime is genuinely absent, the app reports `MISSING_RUNTIME` and the
 agent endpoints answer `503` naming the missing file. That is the designed
@@ -265,6 +267,38 @@ carries a label, node id and measured state — never a port, address or key. If
 the hub is down, the phones keep working and only the roster is missing.
 
 Full guide: **`docs/HUB.md`**.
+
+## Server network (phones that find each other)
+
+The hub is central: one VPS reads many phones. The **server network** is the
+opposite shape — phones that find each other directly, with no VPS and no
+account. Each phone stays a complete server; the network adds discovery, a
+roster and a relay:
+
+1. **Public access** → enable, bind **LAN** (or a VPN interface), auth **Key** or
+   **Both**.
+2. **Server network** → **Turn discovery on** (the screen asks for the nearby
+   devices permissions it needs).
+3. Tap a nearby phone → **Pair**, compare the fingerprint on both screens, and
+   enter the code the other phone shows.
+
+Then each phone lists the others with a measured lamp and the services they
+publish, and one scoped call reaches them:
+
+```http
+POST /v1/mesh/call
+{"server":"0123456789abcdef","service":"agent","op":"ping","args":{}}
+```
+
+Carriers are chosen by capability: LAN/VPN over ordinary TCP, Wi-Fi Direct for
+a group with no router, **Bluetooth Classic** as secure RFCOMM carrying the same
+HTTP request to a bonded phone, and **BLE for discovery only** — its eight-byte
+advertisement cannot carry a request. Discovery is a hint, never trust: only the
+existing pairing creates a peer, `mesh.read`/`mesh.call` never cross a pairing,
+and the roster never contains an address. If nothing is enabled, nothing is
+scanned and nothing is advertised.
+
+Full guide: **`docs/MESH.md`**.
 
 ## Preparing phones from a computer
 
