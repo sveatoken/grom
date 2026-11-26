@@ -658,7 +658,7 @@ Binder methods for the screen (`aiStatusJson`, `aiSaveProviderJson`,
 integrator contract; `app.grom.sdk.connect` gained `aiCatalog`, `aiChat` and
 `aiChatStream`.
 
-Gate: `tools/run-gates` **13/13**, policy **64/64** (#60 keys sealed and
+Gate: `tools/run-gates` **13/13**, policy **65/65** (#60 keys sealed and
 unprojected, #61 ai scopes, #62 endpoint policy, #63 no socket in the adapters,
 #64 published under `ai.read` and nothing polls), `AiProviderTest` **13**,
 `AiStoreTest` **14**, `AiGatewayTest` **26**, `AiRouterTest` **11**,
@@ -669,4 +669,16 @@ Not closed: tools/function calling, images, audio and embeddings are refused
 rather than implemented; no vendor has been called with a real key from this
 repository (the live test is opt-in via `GROM_AI_LIVE_*`); and a vendor SDK needs
 a password session token, because it cannot sign Grom's Ed25519 requests.
+
+### Fix shipped with 0.17.1 — the agent's argv (D98)
+
+Verifying the published artifact found a real defect: `AgentLauncher` passed
+`--experimental-default-type=commonjs`, which the pinned Node v24.22.3 rejects
+with `bad option`. The agent therefore exited before `GROM_AGENT_READY` — the
+server would look installed and dead. The switch is gone (the agent is CommonJS,
+which the pinned runtime loads by default), `AgentLauncherTest` pins the
+six-element argv, policy #65 keeps unproven engine switches out, and
+`scripts/build-node-android.sh --verify` now starts the packaged binary with the
+launcher's exact argv and waits for readiness, so this class of defect fails a
+gate instead of a phone.
 

@@ -33,11 +33,17 @@ The agent is launched as an executable process, not through a shell.
 Command line is exactly:
 ```
 <ApplicationInfo.nativeLibraryDir>/libnode.so
-  --experimental-default-type=commonjs
   <files>/node/grom-agent.js
   --port <loopbackPort>
   --parent-pid <serverPid>
 ```
+
+No engine switch (D98). The agent is CommonJS, which every pinned Node LTS
+loads by default. An experimental flag the packaged runtime does not recognise
+is reported as `bad option` and the process exits before it prints
+`GROM_AGENT_READY`, so the server would look installed and dead. A flag may only
+be added after `scripts/build-node-android.sh --verify` proves the packaged
+binary accepts it.
 No secret, token, path outside the runtime directories, or user data appears in
 argv.
 

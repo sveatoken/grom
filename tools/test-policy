@@ -396,6 +396,14 @@ check "ai provider code opens no socket of its own" \
 check "the ai catalogue is published only under ai read and nothing polls" \
   bash -c "grep -q 'private fun aiDocument' $MAIN/superserver/SuperRouter.kt && grep -q 'PeerScope.AI_READ' $MAIN/superserver/SuperRouter.kt && ! grep -rqE 'ScheduledExecutor|Timer\(|scheduleAtFixedRate|postDelayed' $MAIN/superserver/plugins/ai && grep -q 'ai = aiGateway' $MAIN/ServerRuntime.kt && grep -q 'ai.service()' $MAIN/superserver/SuperServerHost.kt && grep -q 'ai = ai,' $MAIN/superserver/SuperServerHost.kt"
 
+# 65. the agent's argv names no engine switch, and the launcher keeps the
+#     documented shape (D98). A unit test can only prove the launcher emits what
+#     it was written to emit; the runtime's acceptance is proven by execution in
+#     `scripts/build-node-android.sh --verify`, which starts the packaged binary
+#     with this exact argv.
+check "the agent argv carries no unproven engine switch" \
+  bash -c "! grep -qE '\"--experimental-' $MAIN/agent/AgentLauncher.kt && grep -q 'runtime.script.absolutePath' $MAIN/agent/AgentLauncher.kt && grep -q 'launch_probe' scripts/build-node-android.sh && grep -q 'GROM_AGENT_READY' scripts/build-node-android.sh"
+
 echo
 TOTAL=$((PASS + FAIL))
 if [ "$FAIL" -ne 0 ]; then

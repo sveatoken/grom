@@ -666,8 +666,8 @@ that admits them and one that does not is the difference between Grom and every
 
 Node 24.22.3 LTS, bionic arm64, assembled from pinned packages with a SHA-256 per
 archive and accepted only after it **runs** (D35). `node:sqlite` works (Q8
-closed). The agent is CommonJS with `--experimental-default-type=commonjs`, no
-`node_modules`, no bundler, no network at start. That is the bar for a second
+closed). The agent is CommonJS with no engine switch, no
+`node_modules`, no bundler, no network at start (D98). That is the bar for a second
 runtime: pinned, hashed, executed by a script, covered by a protocol test — or it
 is an aspiration, not a runtime.
 

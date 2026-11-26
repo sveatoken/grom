@@ -1601,3 +1601,24 @@ keep reading a provider for a caller that is gone.
 *Enforced by:* `AiGatewayTest` (frames, early close, mid-stream failure),
 `AiRouterTest` (the router hands a `Stream` through), `AiGatewayIntegrationTest`
 (real SSE over a real socket).
+
+## D98 — the agent's argv carries no engine switch, and `--verify` runs it
+**ACCEPTED.** The launcher used to pass `--experimental-default-type=commonjs`
+before the script. That was correct for the runtime it was written against and
+wrong for the runtime this project pins: Node v24.22.3 answers `bad option`,
+exits before printing `GROM_AGENT_READY`, and the server then looks installed and
+dead — the worst failure shape this project has, because every other check still
+passes. The agent is CommonJS and every pinned Node LTS loads it that way without
+a switch, so the flag is gone.
+
+The rule that follows is narrower than "be careful": **argv is verified by
+execution, not by a string assertion.** A unit test can only confirm that the
+launcher emits the argv it was written to emit; it cannot confirm that the
+runtime accepts it. `scripts/build-node-android.sh --verify` therefore starts the
+**packaged binary** with the **launcher's exact argv** and waits for
+`GROM_AGENT_READY`, and says plainly when the host cannot execute the binary
+instead of skipping silently. Policy #65 keeps `--experimental-` out of the
+launcher until such a flag is proven against the pinned runtime.
+
+*Enforced by:* `AgentLauncherTest` (six-element argv, no `--experimental-`),
+`scripts/build-node-android.sh --verify` (a real launch), `tools/test-policy` #65.
