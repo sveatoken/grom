@@ -190,8 +190,10 @@ class GromClient(
          * adds the one-way scoped grant for an inbound reader (D76-D78); API 8
          * adds the measured Doctor report (D80-D84); API 9 adds a supported way
          * for an embedding host to configure the data plane (D86); API 10 adds
-         * the AI gateway (D94-D96); API 11 adds the server network (D99-D101).
+         * the AI gateway (D94-D96); API 11 adds the server network (D99-D101);
+         * API 12 adds the SSH credential check and the operator's current
+         * server (D105-D107).
          */
-        const val API_VERSION: Int = 11
+        const val API_VERSION: Int = 12
     }
 }

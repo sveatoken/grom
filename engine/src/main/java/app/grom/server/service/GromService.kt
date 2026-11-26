@@ -345,6 +345,22 @@ class GromService : Service() {
             guard { runtime.sshClearPin(id.orEmpty()) }
         }
 
+        // --------------------------------------------------- API 12 (D105-D107)
+
+        override fun sshVerify(id: String?, trustFingerprint: String?): String {
+            requireSameSigner()
+            return runtime.sshVerifyJson(id.orEmpty(), trustFingerprint)
+        }
+
+        override fun sshSetActiveJson(id: String?): String {
+            requireSameSigner()
+            return try {
+                runtime.sshSetActiveJson(id)
+            } catch (failure: ApiException) {
+                throw IllegalStateException("GROM_E_${failure.code}: ${failure.message}")
+            }
+        }
+
         override fun lightningProbeJson(): String {
             requireSameSigner()
             return runtime.lightningProbeJson()

@@ -103,6 +103,26 @@ interface IGromServer {
     /** Forgets the TOFU pin after an intentional host key change. */
     void sshClearPin(String id);
 
+    // ------------------------------------------------- API 12 (D105-D107)
+
+    /**
+     * Checks one saved server without opening a tunnel: resolve, connect,
+     * handshake, host key and authentication are always attempted, and the
+     * reverse forward only when the data plane is up. The reply names the stage
+     * that failed (`resolve`, `connect`, `handshake`, `auth`, `forward`), so a
+     * rejected password is not reported as an unreachable host.
+     *
+     * Blocking; call from a background thread.
+     */
+    String sshVerify(String id, String trustFingerprint);
+
+    /**
+     * Marks the operator's current server for the UI and for `/v1/status`; an
+     * empty id clears the selection. The choice is a store fact, never inferred
+     * from order.
+     */
+    String sshSetActiveJson(String id);
+
     /**
      * Runs the Lightning adapter's health op now. This is the only way the
      * dashboard's Lightning lamp can become green (D52).
