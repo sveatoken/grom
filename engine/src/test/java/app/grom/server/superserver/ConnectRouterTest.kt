@@ -170,9 +170,9 @@ class ConnectRouterTest {
     @Test
     fun `anonymous connect describes how to authenticate but lists no service`() {
         val router = buildRouter()
-        val response = router.handle(plain("/grom/v1/connect"), "10.0.0.7:5555")
-        assertEquals(200, (response as SuperResponse.Json).status)
-        val document = body(response)
+        val json = router.handle(plain("/grom/v1/connect"), "10.0.0.7:5555") as SuperResponse.Json
+        assertEquals(200, json.status)
+        val document = body(json)
 
         assertEquals("grom-connect-v1", document["schema"])
         assertEquals("grom-super", document["service"])
@@ -198,7 +198,7 @@ class ConnectRouterTest {
 
         // The document is discovery, not a leak: no token, no password, no
         // peer address and no configuration block.
-        val text = (response as SuperResponse.Json).body
+        val text = json.body
         assertFalse(text.contains("token"))
         assertFalse(text.contains("password"))
         assertFalse(text.contains("notifications"))

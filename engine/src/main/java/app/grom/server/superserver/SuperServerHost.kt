@@ -75,7 +75,12 @@ class SuperServerHost(
      * lives beside every other store — so adding a provider key takes effect on
      * the next request without rebinding the listener (D54).
      */
-    private val ai: AiPort = AiPort.DISABLED
+    private val ai: AiPort = AiPort.DISABLED,
+    /**
+     * The server network (D99). It is read at request time, so enabling
+     * discovery or pairing another server needs no rebind.
+     */
+    private val mesh: MeshPort = MeshPort.DISABLED
 ) {
 
     private val lock = Any()
@@ -167,6 +172,9 @@ class SuperServerHost(
 
     fun isRunning(): Boolean = server?.isRunning() == true
 
+    /** The service ids this plane currently serves; empty while stopped (D101). */
+    fun serviceIds(): Set<String> = registry.ids().toSet()
+
     /**
      * Persists an already-validated document and applies it (D86).
      *
@@ -239,7 +247,9 @@ class SuperServerHost(
             "projects" to projects(),
             "bridge" to bridge(),
             "notifications" to notifications(),
-            "fleet" to fleet()
+            "fleet" to fleet(),
+            // Counts only, never a peer's identity (D59).
+            "mesh" to mesh.summary()
         ) + SuperStatusDocument.build(config, lightningStatus)
     }
 
@@ -337,6 +347,7 @@ class SuperServerHost(
             },
             pairing = pairing,
             ai = ai,
+            mesh = mesh,
             configExport = configExport,
             gromVersion = version,
             dataPlane = {

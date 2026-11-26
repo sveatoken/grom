@@ -194,6 +194,50 @@ class GromService : Service() {
             return aiGuard { runtime.aiProbeProviderJson(providerId.orEmpty()) }
         }
 
+        // ------------------------------------ API 11 (D99-D101, server network)
+
+        override fun meshStatusJson(): String {
+            requireSameSigner()
+            return runtime.meshStatusJson()
+        }
+
+        override fun meshConfigureJson(json: String?): String {
+            requireSameSigner()
+            return try {
+                runtime.meshConfigureJson(json.orEmpty())
+            } catch (failure: ApiException) {
+                throw IllegalStateException("GROM_E_${failure.code}: ${failure.message}")
+            }
+        }
+
+        override fun meshScanJson(): String {
+            requireSameSigner()
+            return try {
+                runtime.meshScanJson()
+            } catch (failure: ApiException) {
+                throw IllegalStateException("GROM_E_${failure.code}: ${failure.message}")
+            }
+        }
+
+        override fun meshRefreshJson(): String {
+            requireSameSigner()
+            return runtime.meshRefreshJson()
+        }
+
+        override fun meshSetSharesJson(json: String?): String {
+            requireSameSigner()
+            return try {
+                runtime.meshSetSharesJson(json.orEmpty())
+            } catch (failure: ApiException) {
+                throw IllegalStateException("GROM_E_${failure.code}: ${failure.message}")
+            }
+        }
+
+        override fun meshCallJson(json: String?): String {
+            requireSameSigner()
+            return runtime.meshCallJson(json.orEmpty())
+        }
+
         /**
          * The gateway's own codes cross the Binder, so the screen can say
          * "the API key was rejected" instead of "it failed" (S4-R016).

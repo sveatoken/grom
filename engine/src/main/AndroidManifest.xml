@@ -18,6 +18,29 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
+    <!-- The server network (D99-D103). Bluetooth is used only when the operator
+         turns discovery on. On Android 12+ the three runtime permissions are
+         requested from the screen; the legacy pair is capped at API 30 and
+         fine location at API 32 (BLE/Wi-Fi Direct discovery below them). Both
+         radio features are optional so a phone without them still installs and
+         simply reports that carrier unavailable. -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+    <!-- Both are declared because Android 12+ refuses a FINE request that does not
+         also name COARSE, and lint treats the pair as one declaration. The screen
+         still asks for FINE: BLE and Wi-Fi Direct discovery below API 31 need it,
+         and a grant of COARSE only leaves the row saying exactly that. -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" android:usesPermissionFlags="neverForLocation" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
+    <uses-feature android:name="android.hardware.wifi.direct" android:required="false" />
+
     <application>
         <!--
           Embedded default (D55): the service is private to the host application

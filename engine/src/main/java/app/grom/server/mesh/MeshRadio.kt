@@ -1,0 +1,40 @@
+// SPDX-License-Identifier: Apache-2.0
+package app.grom.server.mesh
+
+/**
+ * One platform discovery mechanism (D99).
+ *
+ * The engine never touches `android.bluetooth.*` or `android.net.wifi.p2p.*`:
+ * each radio is a thin adapter that publishes [MeshCandidate]s and nothing else.
+ * That keeps the discovery *policy* (dedupe, expiry, bounds, trust) in pure
+ * Kotlin with JVM tests, exactly like the Doctor's probe (D30, D80).
+ *
+ * A radio that cannot run reports why — a missing permission, Bluetooth off,
+ * no Wi-Fi Direct hardware — instead of silently returning an empty list. The UI
+ * must be able to say "scanning is not possible on this phone" rather than
+ * leave the operator waiting for a device that can never appear.
+ */
+interface MeshRadio {
+
+    val transport: MeshTransport
+
+    fun isAvailable(): Boolean
+
+    /** Platform permission names this radio still needs; empty when ready. */
+    fun missingPermissions(): List<String>
+
+    /**
+     * Starts discovery. [sink] may be called from any thread and must be
+     * thread-safe (the engine's book is). Returns false when the radio is not
+     * usable; [lastError] explains why.
+     */
+    fun start(sink: (MeshCandidate) -> Unit): Boolean
+
+    fun stop()
+
+    /** Asks for one bounded scan; no argument means "whatever the adapter does". */
+    fun scanNow()
+
+    /** Why the last start/scan did nothing, or null. Never contains an address. */
+    val lastError: String?
+}

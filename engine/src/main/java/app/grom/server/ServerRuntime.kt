@@ -14,6 +14,14 @@ import app.grom.server.cluster.NodeIdentity
 import app.grom.server.cluster.NodeIdentityStore
 import app.grom.server.cluster.PeerStore
 import app.grom.server.cluster.PeerAddress
+import app.grom.server.mesh.MeshService
+import app.grom.server.mesh.MeshSettings
+import app.grom.server.mesh.MeshSettingsStore
+import app.grom.server.mesh.android.AndroidMeshRadios
+import app.grom.server.mesh.net.BluetoothJsonTransport
+import app.grom.server.mesh.net.LanBeaconNode
+import app.grom.server.mesh.net.RoutingJsonTransport
+import app.grom.server.superserver.MeshAnswer
 import app.grom.server.core.AgentState
 import app.grom.server.core.BindMode
 import app.grom.server.core.BindResolution
@@ -114,13 +122,54 @@ class ServerRuntime(
         secretBox
     )
     private val peerStore = PeerStore(File(rootDir, PeerStore.FILE_NAME))
+
+    /**
+     * The carriers a paired server may live behind (D102): the LAN, Wi-Fi
+     * Direct and VPN all speak `http(s)`, and a bonded Bluetooth Classic link
+     * speaks the same HTTP/1.1 over RFCOMM. One routing transport keeps the
+     * pairing client and the mesh caller on the same code path.
+     */
+    private val meshRadios: AndroidMeshRadios by lazy {
+        AndroidMeshRadios.create(
+            context = context,
+            nodeId = { fleet.identityOrNull()?.nodeId },
+            port = { meshDataPlanePort() },
+            dataPlaneUp = { meshDataPlaneLive() },
+            dataPlaneTarget = { localDataPlane() }
+        )
+    }
+    private val meshTransport: RoutingJsonTransport = RoutingJsonTransport(
+        classic = BluetoothJsonTransport(meshRadios.classic)
+    )
+
     private val fleet = FleetService(
         identityStore = identityStore,
         store = peerStore,
+        client = app.grom.server.cluster.PeerClient(transport = meshTransport),
         defaultLabel = { deviceLabel() },
         localPort = { port },
         audit = { action, detail -> safeAudit(action, detail) }
     )
+
+    private val meshSettingsStore = MeshSettingsStore(File(rootDir, MeshSettings.FILE_NAME))
+    private val mesh = MeshService(
+        identityStore = identityStore,
+        peers = peerStore,
+        settingsStore = meshSettingsStore,
+        caller = app.grom.server.mesh.MeshCaller(transport = meshTransport),
+        beacon = LanBeaconNode(logger = { line -> log(line) }),
+        radios = meshRadios.radios,
+        localServices = { superServer.serviceIds() },
+        localPort = { meshDataPlanePort() },
+        serverRunning = { meshDataPlaneLive() },
+        audit = { action, detail -> safeAudit(action, detail) },
+        logger = { line -> log(line) }
+    )
+
+    init {
+        // A share list may only name a service this device serves (D101).
+        fleet.serviceIds = { superServer.serviceIds() }
+    }
 
     /**
      * The reverse SSH bridge (D58). The manager is owned by the runtime, so the
@@ -211,7 +260,8 @@ class ServerRuntime(
             doctor = { doctorStatusBlock() },
             configExport = { configExportJson() },
             version = { hostVersion(context) },
-            ai = aiGateway
+            ai = aiGateway,
+            mesh = mesh
         )
     }
 
@@ -272,6 +322,10 @@ class ServerRuntime(
             // expected to start the service deliberately (D55); nothing binds
             // unless that happens.
             superServer.start()
+            // Discovery is opt-in and inert until a configuration enables it;
+            // it never runs while the server is stopped.
+            runCatching { mesh.start() }
+                .onFailure { log("mesh start failed: ${it.javaClass.simpleName}") }
 
             scheduler.scheduleWithFixedDelay({ tick() }, TICK_MS, TICK_MS, TimeUnit.MILLISECONDS)
 
@@ -287,6 +341,7 @@ class ServerRuntime(
             if (!running) return
             safeAudit("server.stop", "")
             running = false
+            runCatching { mesh.stop() }
             superServer.stop()
             fleet.onDataPlaneStopped()
             sshTunnels.stopAll()
@@ -892,6 +947,37 @@ class ServerRuntime(
         return Json.encode(result)
     }
 
+    // ------------------------------------------------ Server network (API 11)
+
+    /** The operator view: roster, measured state and nearby, unpaired hints. */
+    fun meshStatusJson(): String = mesh.statusJson()
+
+    fun meshConfigureJson(body: String): String = mesh.configureJson(body)
+
+    /** One bounded scan; no scheduler, no polling (D99). */
+    fun meshScanJson(): String = mesh.scanJson()
+
+    /** Re-reads each paired server's connect document now (blocking). */
+    fun meshRefreshJson(): String = app.grom.server.http.Json.encode(mesh.refresh())
+
+    /** Changes which services one paired server may use here (D101). */
+    fun meshSetSharesJson(body: String): String {
+        val raw = app.grom.server.http.JsonParser.parseObjectOrNull(body)
+            ?: throw ApiException(400, "BAD_SHARE_LIST", "body must be a JSON object")
+        val nodeId = (raw["nodeId"] as? String)?.trim()
+            ?: throw ApiException(400, "BAD_SHARE_LIST", "nodeId is required")
+        val services = (raw["services"] as? List<*>)
+            ?.mapNotNull { (it as? String)?.trim() }
+            ?: throw ApiException(400, "BAD_SHARE_LIST", "services must be a list")
+        return fleet.setSharesJson(nodeId, services)
+    }
+
+    /** Calls a service on a paired server through this device's own key (D100). */
+    fun meshCallJson(body: String): String {
+        val answer = mesh.call(body, "binder")
+        return app.grom.server.http.Json.encode(answer.payload)
+    }
+
     // ------------------------------------------------------- Fleet (API 6)
 
     fun nodeIdentityJson(): String = fleet.identityJson()
@@ -1027,6 +1113,24 @@ class ServerRuntime(
      * The address a tunnel should forward to. It is the data plane's real
      * listening address, so a tunnel never points at a port nothing serves.
      */
+    /**
+     * The port the server network may announce (D99).
+     *
+     * A beacon is only useful when another phone can actually reach this data
+     * plane, so the answer is -1 for a stopped or loopback-only plane. Grom does
+     * not silently move the plane off loopback to make discovery work: turning
+     * on the LAN bind stays an explicit operator decision.
+     */
+    private fun meshDataPlanePort(): Int {
+        if (!running) return -1
+        val config = superServer.currentConfig()
+        if (!config.enabled || !superServer.isRunning()) return -1
+        if (config.bind == BindMode.LOOPBACK) return -1
+        return config.port
+    }
+
+    private fun meshDataPlaneLive(): Boolean = meshDataPlanePort() > 0
+
     private fun localDataPlane(): Pair<String, Int>? {
         if (!running) return null
         val config = superServer.currentConfig()

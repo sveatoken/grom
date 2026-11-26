@@ -64,6 +64,11 @@ class SuperRouter(
      */
     private val ai: AiPort = AiPort.DISABLED,
     /**
+     * The server network (D99). Disabled by default, so a router built without
+     * one answers `503 MESH_DISABLED` instead of inventing a roster.
+     */
+    private val mesh: MeshPort = MeshPort.DISABLED,
+    /**
      * The measured data-plane endpoint, read at request time. A bind that has
      * not happened is reported as such; the route never invents an address.
      */
@@ -170,7 +175,7 @@ class SuperRouter(
                     200,
                     mapOf(
                         "ok" to true,
-                        "plugins" to plugins.all().map {
+                        "plugins" to visiblePlugins(principal).map {
                             describe(it, includeStatus = hasStatusRead(principal))
                         }
                     )
@@ -186,12 +191,14 @@ class SuperRouter(
             path.startsWith("$PLUGINS/") -> pluginRoute(path, request, principal)
 
             path == AI_MODELS -> {
+                if (!serviceAllowed(principal, AI_SERVICE_ID)) return serviceNotShared()
                 if (!hasScope(principal, PeerScope.AI_READ)) return scopeRequired()
                 if (request.method != "GET") return methodNotAllowed(request.method, "GET")
                 aiAnswer(ai.models())
             }
 
             path == AI_CHAT -> {
+                if (!serviceAllowed(principal, AI_SERVICE_ID)) return serviceNotShared()
                 if (!hasScope(principal, PeerScope.AI_CHAT)) return scopeRequired()
                 if (request.method != "POST") return methodNotAllowed(request.method, "POST")
                 if (!isJson(request)) return unsupportedMediaType()
@@ -200,11 +207,30 @@ class SuperRouter(
             }
 
             path == AI_MESSAGES || path == AI_MESSAGES_ALIAS -> {
+                if (!serviceAllowed(principal, AI_SERVICE_ID)) return serviceNotShared()
                 if (!hasScope(principal, PeerScope.AI_CHAT)) return scopeRequired()
                 if (request.method != "POST") return methodNotAllowed(request.method, "POST")
                 if (!isJson(request)) return unsupportedMediaType()
                 if (oversized(request)) return tooLarge()
                 aiAnswer(ai.anthropicMessages(request.body, client))
+            }
+
+            path == MESH -> {
+                if (!hasScope(principal, PeerScope.MESH_READ)) return scopeRequired()
+                if (request.method != "GET") return methodNotAllowed(request.method, "GET")
+                json(200, mesh.document())
+            }
+
+            path == MESH_CALL -> {
+                // A relay grant, deliberately separate from services.call
+                // (D100): asking this device to reach a third server is a
+                // different decision from calling a local service.
+                if (!hasScope(principal, PeerScope.MESH_CALL)) return scopeRequired()
+                if (request.method != "POST") return methodNotAllowed(request.method, "POST")
+                if (!isJson(request)) return unsupportedMediaType()
+                if (oversized(request)) return tooLarge()
+                val answer = mesh.call(request.body, client)
+                json(answer.status, answer.payload)
             }
 
             else -> error(404, "NOT_FOUND", "no such endpoint")
@@ -244,6 +270,10 @@ class SuperRouter(
 
         val plugin = plugins.find(parts[0])
             ?: return error(404, "UNKNOWN_PLUGIN", "no plugin with that id")
+
+        // The operator's per-peer allow-list (D101) is a hard filter: a service
+        // that is not shared is not even described to that peer.
+        if (!serviceAllowed(principal, plugin.id)) return serviceNotShared()
 
         if (parts.size == 1) {
             if (!canReadServices(principal)) return scopeRequired()
@@ -364,6 +394,7 @@ class SuperRouter(
             "auth" to config.auth.name,
             "bind" to config.bind.name,
             "ai" to ai.summary(),
+            "mesh" to mesh.summary(),
             "plugins" to plugins.all().map { describe(it, includeStatus = true) }
         )
         base.putAll(serverStatus())
@@ -441,7 +472,7 @@ class SuperRouter(
                 "path" to PLUGINS,
                 "requires" to PeerScope.SERVICES_READ.wireName,
                 "items" to if (listed) {
-                    plugins.all().map {
+                    visiblePluginsOrNull(principal).map {
                         describe(it, includeStatus = hasStatusReadOrNull(principal))
                     }
                 } else {
@@ -449,6 +480,7 @@ class SuperRouter(
                 }
             ),
             "ai" to aiDocument(principal),
+            "mesh" to meshDocument(),
             "endpoints" to ENDPOINTS
         )
     }
@@ -539,6 +571,47 @@ class SuperRouter(
         )
     }
 
+    /**
+     * The services a caller may even see (D101). The operator sees every
+     * service; a peer with no explicit allow-list sees every service its scopes
+     * allow (the pre-D101 behaviour), and a peer with one sees only those.
+     */
+    private fun visiblePlugins(principal: SuperAuth.Principal): List<Plugin> =
+        plugins.all().filter { serviceAllowed(principal, it.id) }
+
+    private fun visiblePluginsOrNull(principal: SuperAuth.Principal?): List<Plugin> =
+        if (principal == null) emptyList() else visiblePlugins(principal)
+
+    private fun serviceAllowed(principal: SuperAuth.Principal, serviceId: String): Boolean =
+        when (principal) {
+            is SuperAuth.Principal.Operator -> true
+            is SuperAuth.Principal.Peer -> principal.services.isEmpty() ||
+                principal.services.contains(serviceId)
+        }
+
+    /**
+     * The server network inside the discovery document (D99).
+     *
+     * The shape is published always so a client can tell the device *has* a
+     * server network and what it needs; the roster is not duplicated here — it
+     * lives at `GET /v1/mesh` behind `mesh.read`, with no address in it.
+     */
+    private fun meshDocument(): Map<String, Any?> {
+        val summary = mesh.summary()
+        return linkedMapOf(
+            "path" to MESH,
+            "call" to MESH_CALL,
+            "enabled" to (summary["enabled"] as? Boolean ?: false),
+            "requires" to linkedMapOf(
+                "read" to PeerScope.MESH_READ.wireName,
+                "call" to PeerScope.MESH_CALL.wireName
+            )
+        )
+    }
+
+    private fun serviceNotShared(): SuperResponse.Json =
+        error(403, "SERVICE_NOT_SHARED", "this service is not shared with this credential")
+
     private fun hasScope(principal: SuperAuth.Principal, scope: PeerScope): Boolean =
         when (principal) {
             is SuperAuth.Principal.Operator -> true
@@ -611,6 +684,11 @@ class SuperRouter(
         const val PLUGINS: String = "/v1/plugins"
         const val EVENTS: String = "/v1/events"
 
+        /** The server network (D99): an address-free roster and a scoped relay. */
+        const val MESH: String = "/v1/mesh"
+        const val MESH_CALL: String = "/v1/mesh/call"
+        const val AI_SERVICE_ID: String = "ai"
+
         /** The AI gateway (D94): catalogue, OpenAI shape, Anthropic shape. */
         const val AI_PATH: String = "/v1/ai"
         const val AI_MODELS: String = "$AI_PATH/models"
@@ -632,6 +710,8 @@ class SuperRouter(
             "config" to CONFIG,
             "plugins" to PLUGINS,
             "events" to EVENTS,
+            "mesh" to MESH,
+            "meshCall" to MESH_CALL,
             "aiModels" to AI_MODELS,
             "aiChat" to AI_CHAT,
             "aiMessages" to AI_MESSAGES

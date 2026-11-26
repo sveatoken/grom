@@ -46,7 +46,19 @@ class SuperAuth(
     sealed interface Principal {
         data object Operator : Principal
 
-        data class Peer(val nodeId: String, val scopes: Set<PeerScope>) : Principal
+        /**
+         * A paired server or connected app (D73, D101).
+         *
+         * [services] is the operator's per-peer allow-list by plugin id. Empty
+         * keeps the pre-D101 meaning — every operation [scopes] already allow —
+         * so an existing pairing is not silently narrowed. A non-empty set is a
+         * hard filter applied by the router before the plugin is even asked.
+         */
+        data class Peer(
+            val nodeId: String,
+            val scopes: Set<PeerScope>,
+            val services: Set<String> = emptySet()
+        ) : Principal
     }
 
     sealed class Outcome {
