@@ -199,6 +199,61 @@ truthful, but not useful, which is why v${NODE_VERSION} is pinned above.
 EOF
 }
 
+# Launch the agent exactly as AgentLauncher does (S3-R005, D98).
+#
+# A wrong argv is silent at build time and fatal on the phone: the runtime
+# answers "bad option" and the process exits before GROM_AGENT_READY, so the
+# server looks installed and dead. This probe therefore runs the *packaged*
+# binary with the *launcher's* argv and waits for that line. It speaks only when
+# this host can execute the binary; otherwise it says so instead of pretending.
+launch_probe() {
+  local binary script linker tmp pid i ready=0
+  binary="$(libnode_path)"
+  script="$REPO/agent/$SCRIPT_NAME"
+  [ -f "$binary" ] && [ -f "$script" ] || return 0
+
+  local libdir
+  libdir="$(dirname "$binary")"
+  if [ -x /system/bin/linker64 ]; then
+    linker=/system/bin/linker64
+  elif "$binary" --version >/dev/null 2>&1; then
+    linker=""
+  else
+    say "  skip  the packaged runtime cannot execute on this host, so --verify"
+    say "        cannot prove the launch argv; run it on a device (--q8)"
+    return 0
+  fi
+
+  tmp="$(mktemp -d)"
+  mkfifo "$tmp/in"
+  if [ -n "$linker" ]; then
+    LD_LIBRARY_PATH="$libdir" "$linker" "$binary" "$script" \
+      --port 47002 --parent-pid $$ < "$tmp/in" > "$tmp/out" 2> "$tmp/err" &
+  else
+    "$binary" "$script" --port 47002 --parent-pid $$ \
+      < "$tmp/in" > "$tmp/out" 2> "$tmp/err" &
+  fi
+  pid=$!
+  exec 9> "$tmp/in"
+  printf '{"token":"verify-%s","port":47002,"logLevel":"warn"}\n' "$$" >&9
+  exec 9>&-
+  for i in $(seq 1 100); do
+    if grep -q GROM_AGENT_READY "$tmp/out" 2>/dev/null; then ready=1; break; fi
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  kill "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+  if [ "$ready" -eq 1 ]; then
+    ok "the agent starts with the launcher's exact argv (GROM_AGENT_READY)"
+  else
+    bad "the agent did not announce readiness with the launcher's argv"
+    say "        $(head -1 "$tmp/err" 2>/dev/null)"
+  fi
+  rm -rf "$tmp"
+  [ "$ready" -eq 1 ]
+}
+
 status_block() {
   say "Grom agent runtime status"
   say "========================"
@@ -369,6 +424,9 @@ case "$mode" in
       ok "runtime is installable: aarch64 $BINARY_NAME at ${installed_path#"$REPO"/}"
     fi
     agent_present || { bad "$SCRIPT_NAME missing from agent/"; failure=1; }
+    if [ "$failure" -eq 0 ]; then
+      launch_probe || failure=1
+    fi
     if [ "$failure" -ne 0 ]; then
       say ""
       say "Expected when no runtime is installed: the app still builds and reports"

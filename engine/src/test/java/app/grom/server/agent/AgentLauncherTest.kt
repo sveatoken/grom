@@ -67,14 +67,17 @@ class AgentLauncherTest {
     @Test
     fun `argv follows the documented contract`() {
         val spec = launch(runtimeDir())
-        assertEquals(7, spec.argv.size)
+        assertEquals(6, spec.argv.size)
         assertTrue(spec.argv[0].endsWith(AgentLauncher.BINARY_NAME))
-        assertEquals("--experimental-default-type=commonjs", spec.argv[1])
-        assertTrue(spec.argv[2].endsWith(AgentLauncher.SCRIPT_NAME))
-        assertEquals("--port", spec.argv[3])
-        assertEquals("47001", spec.argv[4])
-        assertEquals("--parent-pid", spec.argv[5])
-        assertEquals("1234", spec.argv[6])
+        assertTrue(spec.argv[1].endsWith(AgentLauncher.SCRIPT_NAME))
+        assertEquals("--port", spec.argv[2])
+        assertEquals("47001", spec.argv[3])
+        assertEquals("--parent-pid", spec.argv[4])
+        assertEquals("1234", spec.argv[5])
+        // No engine switch (D98): the pinned Node rejected
+        // --experimental-default-type, and a rejected argv kills the agent
+        // before it announces readiness.
+        assertFalse(spec.argv.any { it.startsWith("--experimental-") })
     }
 
     @Test
@@ -155,7 +158,7 @@ class AgentLauncherTest {
         val runtime = nativeRuntime()
         val spec = launchRuntime(runtime)
         assertEquals(runtime.binaryDirectory.absolutePath + "/" + AgentLauncher.BINARY_NAME, spec.argv[0])
-        assertEquals(runtime.script.absolutePath, spec.argv[2])
+        assertEquals(runtime.script.absolutePath, spec.argv[1])
         assertTrue(runtime.present)
     }
 

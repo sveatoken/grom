@@ -5,8 +5,12 @@
  *
  * The Android supervisor launches this file with:
  *
- *   <files>/node/libnode.so --experimental-default-type=commonjs \
+ *   <files>/node/libnode.so \
  *     <files>/node/grom-agent.js --port <p> --parent-pid <pid>
+ *
+ * No engine switch: the agent is CommonJS, which every pinned Node LTS loads
+ * by default. An experimental flag the runtime does not know is a "bad option"
+ * and the process exits before GROM_AGENT_READY (D98).
  *
  * argv never carries a secret. The bearer token and the configured facade port
  * arrive on stdin as one JSON object followed by a newline, after which the

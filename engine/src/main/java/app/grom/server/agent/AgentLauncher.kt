@@ -69,9 +69,15 @@ object AgentLauncher {
         val missing = runtime.missingFile()
         require(missing == null) { "agent runtime incomplete: missing $missing" }
 
+        // No engine switch here on purpose (D98). The agent is CommonJS, and
+        // every Node LTS this project has pinned loads it that way with no
+        // switch. `--experimental-default-type` was accepted by an older runtime
+        // and rejected by the pinned one; a rejected argv exits before
+        // GROM_AGENT_READY is printed, so the server looks installed and dead.
+        // Only `--verify` may add a flag, after proving that the packaged
+        // binary accepts it (scripts/build-node-android.sh).
         val argv = listOf(
             runtime.binary.absolutePath,
-            "--experimental-default-type=commonjs",
             runtime.script.absolutePath,
             "--port", port.toString(),
             "--parent-pid", parentPid.toString()
