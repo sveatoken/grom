@@ -1,13 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 package app.grom.server.ssh
 
+import app.grom.server.core.SuperBindPolicy
 import app.grom.server.store.SecretBox
 import org.apache.sshd.server.SshServer
 import org.apache.sshd.server.auth.keyboard.UserAuthKeyboardInteractiveFactory
+import org.apache.sshd.server.auth.pubkey.PublickeyAuthenticator
+import org.apache.sshd.server.auth.pubkey.UserAuthPublicKeyFactory
 import org.apache.sshd.server.auth.password.PasswordAuthenticator
+import org.apache.sshd.common.util.net.SshdSocketAddress
 import org.apache.sshd.server.forward.AcceptAllForwardingFilter
+import org.apache.sshd.server.forward.TcpForwardingFilter
 import org.apache.sshd.server.keyprovider.SimpleGeneratorHostKeyProvider
 import org.junit.After
+import org.junit.Assume
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -19,6 +25,7 @@ import org.junit.rules.TemporaryFolder
 import java.io.File
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.InetAddress
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
@@ -353,6 +360,132 @@ class SshTunnelManagerTest {
         assertFalse(manager.isActive(saved.id))
     }
 
+    /**
+     * The most common real answer to "my password does not work": the server
+     * does not take passwords at all (D110). The reply says which methods it
+     * offers, so the screen can say "publickey only" instead of "wrong password".
+     */
+    @Test(timeout = 120_000)
+    fun `a server that takes no passwords is diagnosed as such`() {
+        // A separate server, built that way from the start: changing the
+        // authenticator of a running one leaves the advertised list stale, and
+        // the point of this test is what the server *offers*.
+        val keysOnly = SshServer.setUpDefaultServer().apply {
+            host = "127.0.0.1"
+            port = 0
+            keyPairProvider = SimpleGeneratorHostKeyProvider(
+                File(temp.root, "hostkey-keysonly.ser").toPath()
+            )
+            passwordAuthenticator = null
+            publickeyAuthenticator = PublickeyAuthenticator { _, _, _ -> false }
+            // Named explicitly so the advertised list is a fact of this test
+            // rather than of the driver's default wiring.
+            userAuthFactories = listOf(UserAuthPublicKeyFactory.INSTANCE)
+            forwardingFilter = AcceptAllForwardingFilter.INSTANCE
+        }
+        keysOnly.start()
+        try {
+            val store = newStore()
+            val saved = store.upsert(
+                SshTargetDraft(
+                    label = "keys only",
+                    host = "127.0.0.1",
+                    port = keysOnly.port,
+                    username = "grom",
+                    auth = SshAuth.PASSWORD,
+                    password = "s3cret-pass",
+                    remoteForwardPort = freePort()
+                )
+            )
+            val manager = manager(store)
+            val probe = manager.connect(saved.id, null) as SshTunnelManager.Result.HostKeyUnverified
+            val result = manager.connect(saved.id, probe.fingerprint)
+
+            assertTrue("expected a failure, got $result", result is SshTunnelManager.Result.Failed)
+            val failed = result as SshTunnelManager.Result.Failed
+            assertEquals(
+                "offered=${failed.authMethods} message=${failed.message}",
+                "SSH_AUTH_METHOD_NOT_ALLOWED",
+                failed.code
+            )
+            assertEquals(SshTunnelManager.Stage.AUTH, failed.stage)
+            assertEquals(listOf("publickey"), failed.authMethods)
+        } finally {
+            runCatching { keysOnly.stop(true) }
+        }
+    }
+
+    /**
+     * The data plane bound to the LAN address (which the mesh needs) must still
+     * deliver through the tunnel. Before D111 the forward policy only accepted
+     * loopback, so this connected green and then dropped every connection.
+     */
+    @Test(timeout = 120_000)
+    fun `a data plane on the lan address still carries bytes`() {
+        val lan: InetAddress? = SuperBindPolicy.selectLan(SuperBindPolicy.localAddresses())
+        Assume.assumeTrue("this host has no non-loopback IPv4 address", lan != null)
+        val lanEcho = ServerSocket(0, 4, lan)
+        val accepted = CountDownLatch(1)
+        val lanThread = Thread({
+            while (!Thread.currentThread().isInterrupted) {
+                val client = runCatching { lanEcho.accept() }.getOrNull() ?: return@Thread
+                accepted.countDown()
+                runCatching {
+                    val request = client.getInputStream().bufferedReader().readLine()
+                    client.getOutputStream().write("lan:$request\n".toByteArray())
+                    client.getOutputStream().flush()
+                }
+                runCatching { client.close() }
+            }
+        }, "lan-echo")
+        lanThread.isDaemon = true
+        lanThread.start()
+
+        try {
+            val store = newStore()
+            val remotePort = freePort()
+            val saved = store.upsert(
+                SshTargetDraft(
+                    label = "lan bind",
+                    host = "127.0.0.1",
+                    port = sshPort,
+                    username = "grom",
+                    auth = SshAuth.PASSWORD,
+                    password = "s3cret-pass",
+                    remoteForwardPort = remotePort
+                )
+            )
+            val manager = SshTunnelManager(
+                store = store,
+                audit = { _, _ -> },
+                logger = { _ -> },
+                localTarget = { lan!!.hostAddress to lanEcho.localPort }
+            )
+            val probe = manager.connect(saved.id, null) as SshTunnelManager.Result.HostKeyUnverified
+            val result = manager.connect(saved.id, probe.fingerprint)
+            assertTrue("expected connected, got $result", result is SshTunnelManager.Result.Connected)
+
+            var response: String? = null
+            runCatching {
+                Socket("127.0.0.1", remotePort).use { socket ->
+                    socket.soTimeout = 15_000
+                    socket.getOutputStream().write("hello\n".toByteArray())
+                    socket.getOutputStream().flush()
+                    response = socket.getInputStream().bufferedReader().readLine()
+                }
+            }
+            assertTrue(
+                "the forwarded connection must reach the LAN-bound data plane",
+                accepted.await(15, TimeUnit.SECONDS)
+            )
+            assertEquals("lan:hello", response)
+            manager.disconnect(saved.id)
+        } finally {
+            lanThread.interrupt()
+            runCatching { lanEcho.close() }
+        }
+    }
+
     /** A port with nothing listening is a different sentence from a bad password. */
     @Test(timeout = 120_000)
     fun `a closed port is an unreachable host`() {
@@ -606,49 +739,49 @@ class SshTunnelManagerTest {
 }
 class SshForwardingPolicyTest {
 
-    private val policy = SshForwardingPolicy(localPort = 47002)
+    private val policy = SshForwardingPolicy("127.0.0.1" to 47002)
 
     @Test
-    fun `only the local data plane port may be reached`() {
-        assertTrue(
-            policy.canConnect(
-                org.apache.sshd.server.forward.TcpForwardingFilter.Type.Forwarded,
-                org.apache.sshd.common.util.net.SshdSocketAddress("127.0.0.1", 47002),
-                null
-            )
-        )
-        assertFalse(
-            policy.canConnect(
-                org.apache.sshd.server.forward.TcpForwardingFilter.Type.Forwarded,
-                org.apache.sshd.common.util.net.SshdSocketAddress("127.0.0.1", 22),
-                null
-            )
-        )
-        assertFalse(
-            policy.canConnect(
-                org.apache.sshd.server.forward.TcpForwardingFilter.Type.Forwarded,
-                org.apache.sshd.common.util.net.SshdSocketAddress("10.0.0.1", 47002),
-                null
-            )
-        )
+    fun `only the requested local endpoint may be reached`() {
+        assertTrue(policy.canConnect(Forwarded, address("127.0.0.1", 47002), null))
+        // The same endpoint, spelled the way another stack may spell it.
+        assertTrue(policy.canConnect(Forwarded, address("localhost", 47002), null))
+        assertFalse(policy.canConnect(Forwarded, address("127.0.0.1", 22), null))
+        assertFalse(policy.canConnect(Forwarded, address("10.0.0.1", 47002), null))
+    }
+
+    /**
+     * The data plane may be bound to the phone's LAN address, which the mesh
+     * needs. The forward has to land there — a loopback-only rule reported the
+     * tunnel as connected and then dropped every connection (D111).
+     */
+    @Test
+    fun `a data plane on the lan address may be reached there`() {
+        val lan = SshForwardingPolicy("192.168.1.50" to 47002)
+        assertTrue(lan.canConnect(Forwarded, address("192.168.1.50", 47002), null))
+        assertFalse(lan.canConnect(Forwarded, address("192.168.1.51", 47002), null))
+        assertFalse(lan.canConnect(Forwarded, address("127.0.0.1", 47002), null))
+        assertFalse(lan.canConnect(Forwarded, address("192.168.1.50", 22), null))
+    }
+
+    /** With no data plane there is no endpoint, and nothing may be reached. */
+    @Test
+    fun `no local endpoint accepts nothing`() {
+        val none = SshForwardingPolicy(null)
+        assertFalse(none.canConnect(Forwarded, address("127.0.0.1", 47002), null))
     }
 
     @Test
     fun `direct channels agent and x11 are all refused`() {
-        assertFalse(
-            policy.canConnect(
-                org.apache.sshd.server.forward.TcpForwardingFilter.Type.Direct,
-                org.apache.sshd.common.util.net.SshdSocketAddress("127.0.0.1", 47002),
-                null
-            )
-        )
+        assertFalse(policy.canConnect(TcpForwardingFilter.Type.Direct, address("127.0.0.1", 47002), null))
         assertFalse(policy.canForwardAgent(null, "auth-agent-req@openssh.com"))
         assertFalse(policy.canForwardX11(null, "x11-req"))
-        assertFalse(
-            policy.canListen(
-                org.apache.sshd.common.util.net.SshdSocketAddress("127.0.0.1", 47002),
-                null
-            )
-        )
+        assertFalse(policy.canListen(address("127.0.0.1", 47002), null))
+    }
+
+    private fun address(host: String, port: Int): SshdSocketAddress = SshdSocketAddress(host, port)
+
+    private companion object {
+        val Forwarded: TcpForwardingFilter.Type = TcpForwardingFilter.Type.Forwarded
     }
 }

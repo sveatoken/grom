@@ -914,7 +914,7 @@ class ServerRuntime(
                 "pinned" to result.pinned,
                 "fingerprint" to result.observed
             )
-            is SshTunnelManager.Result.Failed -> mapOf(
+            is SshTunnelManager.Result.Failed -> linkedMapOf<String, Any?>(
                 "ok" to false,
                 "state" to "failed",
                 "code" to result.code,
@@ -922,7 +922,14 @@ class ServerRuntime(
                 // Which stage broke: resolve, connect, handshake, auth or
                 // forward. The UI turns this into a sentence (D105).
                 "stage" to result.stage.wireName
-            )
+            ).apply {
+                // What the server said it accepts, when an authentication
+                // attempt actually received that reply (D110). Absent — not
+                // empty — means it was not measured.
+                if (result.authMethods.isNotEmpty()) {
+                    put("authMethods", result.authMethods)
+                }
+            }
         }
         return Json.encode(body)
     }

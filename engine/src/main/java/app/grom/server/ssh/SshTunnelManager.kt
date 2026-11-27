@@ -4,6 +4,7 @@ package app.grom.server.ssh
 import org.apache.sshd.client.SshClient
 import org.apache.sshd.client.keyverifier.ServerKeyVerifier
 import org.apache.sshd.client.session.ClientSession
+import org.apache.sshd.client.session.ClientUserAuthServiceFactory
 import org.apache.sshd.common.keyprovider.KeyIdentityProvider
 import org.apache.sshd.common.session.Session
 import org.apache.sshd.common.session.SessionListener
@@ -31,7 +32,9 @@ import java.util.concurrent.atomic.AtomicReference
  * passes the fingerprint it saw, which is how the UI asks for confirmation.
  *
  * Nothing here is optimistic: `CONNECTED` is set only after the server has
- * acknowledged the remote forward. Every other path reports a stable code.
+ * acknowledged the remote forward. Every other path reports a stable code, and
+ * an authentication refusal additionally reports the methods the server said it
+ * accepts when that reply was seen (D110) — an empty list means "not measured".
  */
 class SshTunnelManager(
     private val store: SshTargetStore,
@@ -90,7 +93,13 @@ class SshTunnelManager(
         data class Failed(
             val code: String,
             val message: String,
-            val stage: Stage = Stage.AUTH
+            val stage: Stage = Stage.AUTH,
+            /**
+             * The methods the server said it would accept, when an
+             * authentication attempt actually received that reply (D110).
+             * Empty means "not measured", never "nothing is allowed".
+             */
+            val authMethods: List<String> = emptyList()
         ) : Result()
 
         /**
@@ -314,12 +323,23 @@ class SshTunnelManager(
         val stage = AtomicReference(Stage.RESOLVE)
 
         val client = SshClient.setUpDefaultClient()
+        // Record what the server says it will accept, so a rejected password can
+        // be told apart from a server that does not accept passwords at all
+        // (D110). The factory is the driver's own class with one hook added; if
+        // the hook is never called the list stays empty and nothing changes.
+        val authMethods = SshAuthMethods()
+        // The default list is installed on `start()`, not by `setUpDefaultClient`,
+        // so it is named explicitly here rather than read back from the client.
+        client.serviceFactories = SshClient.DEFAULT_SERVICE_FACTORIES.map { factory ->
+            if (factory is ClientUserAuthServiceFactory) authMethods else factory
+        }
         // MINA rejects an incoming forwarded-tcpip channel when the client has no
         // forwarding filter, and an accept-all filter would let a compromised
         // server reach any port on the phone. This policy allows exactly one
-        // destination: the data plane we asked to expose (D58). A port of -1
-        // matches nothing, which is what a verify without a data plane wants.
-        client.forwardingFilter = SshForwardingPolicy(local?.second ?: -1)
+        // destination: the local endpoint we asked to expose (D58, D111). A null
+        // local endpoint matches nothing, which is what a verify without a data
+        // plane wants.
+        client.forwardingFilter = SshForwardingPolicy(local)
         client.serverKeyVerifier = ServerKeyVerifier { _, _, key: PublicKey ->
             val fingerprint = SshKeys.fingerprint(key)
             observed.set(fingerprint)
@@ -481,8 +501,14 @@ class SshTunnelManager(
                     return Result.HostKeyMismatch(pinned ?: trustHostKey ?: "", fingerprint)
                 }
             }
-            val diagnosis = diagnose(failure, stage.get())
-            return fail(target.id, diagnosis.code, diagnosis.message, diagnosis.stage)
+            val diagnosis = diagnose(failure, stage.get(), target.auth, authMethods.lastOffered)
+            return fail(
+                target.id,
+                diagnosis.code,
+                diagnosis.message,
+                diagnosis.stage,
+                diagnosis.authMethods
+            )
         }
     }
 
@@ -509,12 +535,13 @@ class SshTunnelManager(
         id: String,
         code: String,
         message: String,
-        stage: Stage = Stage.AUTH
+        stage: Stage = Stage.AUTH,
+        authMethods: List<String> = emptyList()
     ): Result {
         failures = failures + (id to (code to clock()))
         audit("ssh.failed", "target=$id code=$code stage=${stage.wireName}")
         logger("ssh failed: target=$id code=$code stage=${stage.wireName}")
-        return Result.Failed(code, message, stage)
+        return Result.Failed(code, message, stage, authMethods)
     }
 
     /**
@@ -522,7 +549,12 @@ class SshTunnelManager(
      * stage it really belongs to (a refused TCP connect surfaces from MINA
      * during session verification, so the raw stage would say "handshake").
      */
-    private data class Diagnosis(val code: String, val message: String, val stage: Stage)
+    private data class Diagnosis(
+        val code: String,
+        val message: String,
+        val stage: Stage,
+        val authMethods: List<String> = emptyList()
+    )
 
     /**
      * Turns a failure into a code by the stage that threw (D105).
@@ -530,8 +562,20 @@ class SshTunnelManager(
      * The stages are advanced immediately before each call, so this never has
      * to guess from an exception class — and the driver's own message is never
      * used, because it can carry the host, the user name or a key fragment.
+     *
+     * An authentication failure is split once more (D110): when the server
+     * actually said which methods it accepts and the stored credential's method
+     * is not among them, the answer is not "wrong password" but "this server
+     * does not accept that kind of login". That is the difference between an
+     * operator retyping a correct password and an operator turning
+     * `PasswordAuthentication` on (or generating a key).
      */
-    private fun diagnose(failure: Throwable, stage: Stage): Diagnosis = when (stage) {
+    private fun diagnose(
+        failure: Throwable,
+        stage: Stage,
+        auth: SshAuth,
+        offered: List<String>
+    ): Diagnosis = when (stage) {
         Stage.RESOLVE -> Diagnosis(
             "SSH_HOST_UNKNOWN",
             "that host name could not be resolved; check the spelling or use the IP address",
@@ -574,15 +618,45 @@ class SshTunnelManager(
                 Stage.HANDSHAKE
             )
         }
-        Stage.AUTH -> Diagnosis(
-            "SSH_AUTH_FAILED",
-            "the server rejected the username or the password",
-            Stage.AUTH
-        )
+        Stage.AUTH -> authDiagnosis(auth, offered)
         Stage.FORWARD -> Diagnosis(
             "SSH_FORWARD_REFUSED",
             "the server refused the remote forward port",
             Stage.FORWARD
+        )
+    }
+
+    /**
+     * "The password is wrong" and "this server does not take passwords" are
+     * different sentences, and only the server can tell them apart. [offered] is
+     * empty when no failure reply was seen, and then the generic answer stands.
+     */
+    private fun authDiagnosis(auth: SshAuth, offered: List<String>): Diagnosis {
+        val methods = offered.joinToString(", ")
+        if (offered.isNotEmpty()) {
+            if (auth == SshAuth.PASSWORD && !SshAuthMethods.acceptsPassword(offered)) {
+                return Diagnosis(
+                    "SSH_AUTH_METHOD_NOT_ALLOWED",
+                    "this server does not accept password login; it offers: $methods",
+                    Stage.AUTH,
+                    offered
+                )
+            }
+            if (auth == SshAuth.KEY && !SshAuthMethods.acceptsPublicKey(offered)) {
+                return Diagnosis(
+                    "SSH_AUTH_METHOD_NOT_ALLOWED",
+                    "this server does not accept public key login; it offers: $methods",
+                    Stage.AUTH,
+                    offered
+                )
+            }
+        }
+        return Diagnosis(
+            "SSH_AUTH_FAILED",
+            if (auth == SshAuth.KEY) "the server rejected the username or that key"
+            else "the server rejected the username or the password",
+            Stage.AUTH,
+            offered
         )
     }
 
@@ -611,15 +685,25 @@ class SshTunnelManager(
 }
 
 /**
- * The client-side forwarding policy of the SSH bridge (D58).
+ * The client-side forwarding policy of the SSH bridge (D58, D111).
  *
  * It answers `true` for one thing only: a `forwarded-tcpip` channel addressed to
- * loopback on the port of the local data plane. Agent forwarding, X11, local
- * listens and every other destination are refused, so a malicious or
+ * the exact local endpoint this connection asked to expose. Agent forwarding,
+ * X11, local listens and every other destination are refused, so a malicious or
  * misconfigured server cannot use the session to reach another service on the
- * phone. This class is pure and unit-tested without a network.
+ * phone.
+ *
+ * The destination is *not* assumed to be loopback. The data plane may be bound
+ * to loopback (the default), to the phone's LAN address (which the mesh needs),
+ * or to the wildcard, and the forward has to land on whichever of those is
+ * actually listening — otherwise the tunnel reports `CONNECTED` and then drops
+ * every single connection, which is worse than a refusal because the screen
+ * says it is fine (D111). The address is taken from our own request, never from
+ * the server, so the rule stays exactly as narrow as one endpoint.
+ *
+ * This class is pure and unit-tested without a network.
  */
-internal class SshForwardingPolicy(private val localPort: Int) : ForwardingFilter {
+internal class SshForwardingPolicy(private val local: Pair<String, Int>?) : ForwardingFilter {
 
     override fun canForwardAgent(session: Session?, requestType: String?): Boolean = false
 
@@ -633,8 +717,15 @@ internal class SshForwardingPolicy(private val localPort: Int) : ForwardingFilte
         session: Session?
     ): Boolean {
         if (type != TcpForwardingFilter.Type.Forwarded || address == null) return false
-        if (address.port != localPort) return false
-        val host = address.hostName?.lowercase() ?: return false
-        return host == "127.0.0.1" || host == "localhost" || host == "::1"
+        val requested = local ?: return false
+        if (address.port != requested.second) return false
+        val host = address.hostName ?: return false
+        return canonical(host) == canonical(requested.first)
+    }
+
+    /** Loopback spellings are the same endpoint; everything else is compared as-is. */
+    private fun canonical(host: String): String {
+        val lowered = host.trim().lowercase()
+        return if (lowered == "localhost" || lowered == "::1") "127.0.0.1" else lowered
     }
 }
