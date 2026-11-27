@@ -139,6 +139,75 @@ class MeshModelTest {
     }
 
     @Test
+    fun `the bluetooth switch and the system radio are two different facts`() {
+        // D109: an engine that predates the switch omits the key, and "on" is
+        // the safe reading — it preserves the behaviour discovery always had.
+        val legacy = MeshModel.parse(mapOf("enabled" to true))
+        assertTrue(legacy.bluetooth)
+        assertNull(legacy.bluetoothOn)
+        assertFalse(legacy.needsSystemBluetooth())
+
+        val switchedOff = MeshModel.parse(
+            mapOf("enabled" to true, "bluetooth" to false, "bluetoothOn" to false)
+        )
+        assertFalse(switchedOff.bluetooth)
+        assertFalse(switchedOff.needsSystemBluetooth())
+
+        val radioOff = MeshModel.parse(
+            mapOf("enabled" to true, "bluetooth" to true, "bluetoothOn" to false)
+        )
+        assertTrue(radioOff.needsSystemBluetooth())
+
+        val radioOn = MeshModel.parse(mapOf("bluetooth" to true, "bluetoothOn" to true))
+        assertFalse(radioOn.needsSystemBluetooth())
+    }
+
+    @Test
+    fun `a radio that is switched off for the mesh is not an error`() {
+        val screen = MeshModel.parse(
+            mapOf(
+                "bluetooth" to false,
+                "radios" to listOf(
+                    mapOf(
+                        "transport" to "bluetooth_le",
+                        "inUse" to false,
+                        "available" to true,
+                        "platformOn" to true,
+                        "missingPermissions" to emptyList<String>(),
+                        "error" to null
+                    )
+                )
+            )
+        )
+        val row = screen.radios.single()
+        assertFalse(row.inUse)
+        assertTrue(row.available)
+        assertNull(MeshModel.radioErrorRes(row.error))
+    }
+
+    @Test
+    fun `a radio code is a sentence, and an unknown code stays visible`() {
+        assertEquals(
+            app.grom.server.R.string.mesh_err_ble_advertise_failed,
+            MeshModel.radioErrorRes("BLE_ADVERTISE_FAILED:1")
+        )
+        assertEquals(
+            app.grom.server.R.string.mesh_err_bluetooth_disabled,
+            MeshModel.radioErrorRes("BLUETOOTH_DISABLED")
+        )
+        assertNull(MeshModel.radioErrorRes("SOMETHING_NEW"))
+        assertNull(MeshModel.radioErrorRes(null))
+        assertEquals(
+            app.grom.server.R.string.mesh_err_wifi_direct_disabled,
+            MeshModel.platformOffRes("wifi_direct")
+        )
+        assertEquals(
+            app.grom.server.R.string.mesh_err_bluetooth_disabled,
+            MeshModel.platformOffRes("bluetooth_classic")
+        )
+    }
+
+    @Test
     fun `every transport has a real string`() {
         for (transport in MeshModel.TRANSPORT_ORDER) {
             assertTrue(MeshModel.transportRes(transport) != 0)

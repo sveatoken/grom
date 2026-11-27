@@ -65,6 +65,7 @@ import app.grom.server.ui.MenuEntry
 import app.grom.server.ui.MenuModel
 import app.grom.server.ui.MeshModel
 import app.grom.server.ui.MeshNearbyRow
+import app.grom.server.ui.MeshRadioRow
 import app.grom.server.ui.MeshScreen
 import app.grom.server.ui.MeshServerRow
 import app.grom.server.ui.NotifyModel
@@ -185,6 +186,9 @@ class GromActivity : Activity() {
     private lateinit var meshToggleButton: TextView
     private lateinit var meshStateText: TextView
     private lateinit var meshRadiosText: TextView
+    private lateinit var meshBluetoothText: TextView
+    private lateinit var meshBluetoothButton: TextView
+    private lateinit var meshBluetoothSettingsButton: TextView
     private lateinit var meshDetail: TextView
     private var meshScreen: MeshScreen? = null
     private var meshRefreshing = false
@@ -193,6 +197,7 @@ class GromActivity : Activity() {
     /** Set while a permission dialog answers a toggle or a scan (D104). */
     private var pendingMeshEnable = false
     private var pendingMeshScan = false
+    private var pendingMeshBluetooth = false
 
     // Doctor (D80-D84). The document is the engine's measurement; this screen
     // only paints it, so nothing here can make a lamp greener than the engine
@@ -1602,7 +1607,30 @@ class GromActivity : Activity() {
         body.addView(label(getString(R.string.mesh_radios), palette))
         body.addView(gap(4))
         body.addView(meshRadiosText)
-        body.addView(gap(8))
+
+        body.addView(divider(palette))
+        body.addView(label(getString(R.string.mesh_bluetooth), palette))
+        body.addView(text(getString(R.string.mesh_bluetooth_hint), 11f, palette.muted))
+        body.addView(gap(6))
+        // The switch decides whether Grom uses Bluetooth. It is deliberately
+        // *not* the system radio switch: Android 13+ refuses enable()/disable()
+        // for apps, so when the radio is off the screen offers the settings
+        // page instead of pretending it can flip it.
+        meshBluetoothText = text("", 13f, palette.onSurface)
+        body.addView(meshBluetoothText)
+        body.addView(gap(6))
+        meshBluetoothButton = fleetButton(R.string.mesh_bluetooth_disable) { toggleMeshBluetooth() }
+        body.addView(meshBluetoothButton)
+        meshBluetoothSettingsButton = fleetButton(R.string.mesh_open_bluetooth_settings) {
+            // Android's own page. Never ACTION_REQUEST_ENABLE: Grom may not ask
+            // to switch the radio behind the operator's back (D109).
+            openSystemSettings(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS)
+        }
+        meshBluetoothSettingsButton.visibility = View.GONE
+        body.addView(gap(6))
+        body.addView(meshBluetoothSettingsButton)
+
+        body.addView(divider(palette))
         meshToggleButton = fleetButton(R.string.mesh_enable) { toggleMesh() }
         body.addView(meshToggleButton)
         body.addView(gap(6))
@@ -1715,10 +1743,17 @@ class GromActivity : Activity() {
         applyMeshEnabled(next)
     }
 
-    private fun applyMeshEnabled(enabled: Boolean) {
+    private fun applyMeshEnabled(enabled: Boolean) = applyMeshSettings(mapOf("enabled" to enabled))
+
+    /**
+     * Writes one or more mesh switches through the single `meshConfigureJson`
+     * call. Absent fields keep their value in the engine, so the Bluetooth
+     * toggle cannot accidentally turn discovery off.
+     */
+    private fun applyMeshSettings(fields: Map<String, Any?>) {
         Thread {
             val result = runCatching {
-                fleetDoc { it.meshConfigureJson(Json.encode(mapOf("enabled" to enabled))) }
+                fleetDoc { it.meshConfigureJson(Json.encode(fields)) }
             }
             handler.post {
                 val document = result.getOrNull()
@@ -1733,9 +1768,37 @@ class GromActivity : Activity() {
         }.start()
     }
 
+    /**
+     * Bluetooth on/off for the mesh (D109).
+     *
+     * Turning it on asks for the Bluetooth runtime permissions first — the same
+     * way discovery does — because a radio that starts without them only
+     * produces `MESH_PERMISSION_REQUIRED`. Turning it off never needs anything.
+     */
+    private fun toggleMeshBluetooth() {
+        if (!connected) return
+        val next = !(meshScreen?.bluetooth ?: true)
+        if (next) {
+            val missing = bluetoothPermissions()
+            if (missing.isNotEmpty()) {
+                pendingMeshBluetooth = true
+                requestPermissions(missing.toTypedArray(), REQUEST_MESH_PERMISSIONS)
+                return
+            }
+        }
+        applyMeshSettings(mapOf("bluetooth" to next))
+    }
+
     /** The runtime permissions this phone's radios still need, if any. */
     private fun missingMeshPermissions(): List<String> =
         meshScreen?.radios.orEmpty()
+            .flatMap { it.missingPermissions }
+            .distinct()
+
+    /** Only the Bluetooth radios' missing permissions, for the Bluetooth switch. */
+    private fun bluetoothPermissions(): List<String> =
+        meshScreen?.radios.orEmpty()
+            .filter { it.transport == "bluetooth_classic" || it.transport == "bluetooth_le" }
             .flatMap { it.missingPermissions }
             .distinct()
 
@@ -1748,13 +1811,28 @@ class GromActivity : Activity() {
         if (requestCode != REQUEST_MESH_PERMISSIONS) return
         val enable = pendingMeshEnable
         val scan = pendingMeshScan
+        val bluetooth = pendingMeshBluetooth
         pendingMeshEnable = false
         pendingMeshScan = false
+        pendingMeshBluetooth = false
         // Re-measure first: the rows then say what is still missing instead of
         // assuming the grant covered everything that was asked for.
         refreshMesh()
+        if (bluetooth) applyMeshSettings(mapOf("bluetooth" to true))
         if (enable) applyMeshEnabled(true)
         if (scan) scanMesh()
+    }
+
+    /**
+     * A radio's code in words. A code with a platform detail
+     * (`BLE_ADVERTISE_FAILED:1`) keeps the raw text in parentheses: the sentence
+     * says what happened, the code is what a bug report needs.
+     */
+    private fun meshRadioDetail(radio: MeshRadioRow): String {
+        val raw = radio.error ?: return getString(R.string.mesh_radio_not_supported)
+        val res = MeshModel.radioErrorRes(raw) ?: return raw
+        val sentence = getString(res)
+        return if (raw.contains(':')) "$sentence ($raw)" else sentence
     }
 
     private fun meshFailure(failure: Throwable?): String {
@@ -1771,7 +1849,15 @@ class GromActivity : Activity() {
         if (!::meshStateText.isInitialized) return
 
         val signature = buildString {
-            append(screen.enabled).append('|').append(screen.nearby.size).append('|')
+            append(screen.enabled).append('|')
+            append(screen.bluetooth).append('|').append(screen.bluetoothOn).append('|')
+            append(screen.nearby.size).append('|')
+            for (radio in screen.radios) {
+                append(radio.transport).append(':').append(radio.inUse).append(':')
+                append(radio.available).append(':').append(radio.platformOn).append(':')
+                append(radio.error).append(':')
+                append(radio.missingPermissions.size).append('|')
+            }
             for (server in screen.servers) {
                 append(server.nodeId).append(':').append(server.state).append(':')
                 append(server.services.size).append(':').append(server.sharedServices.size).append('|')
@@ -1794,6 +1880,32 @@ class GromActivity : Activity() {
             )
         }
 
+        // Bluetooth: the switch Grom owns, and the fact about the switch it does
+        // not (D109). A radio the operator switched off is stated as a fact, not
+        // as a failure, and the system page is offered rather than opened.
+        if (::meshBluetoothText.isInitialized) {
+            val systemOff = screen.bluetooth && screen.bluetoothOn == false
+            meshBluetoothText.text = buildString {
+                append(
+                    getString(
+                        if (screen.bluetooth) R.string.mesh_bluetooth_on
+                        else R.string.mesh_bluetooth_off
+                    )
+                )
+                if (systemOff) {
+                    append("\n").append(getString(R.string.mesh_bluetooth_system_off))
+                }
+            }
+            meshBluetoothButton.text = getString(
+                if (screen.bluetooth) R.string.mesh_bluetooth_disable
+                else R.string.mesh_bluetooth_enable
+            )
+            if (::meshBluetoothSettingsButton.isInitialized) {
+                meshBluetoothSettingsButton.visibility =
+                    if (systemOff) View.VISIBLE else View.GONE
+            }
+        }
+
         meshRadiosText.text = buildString {
             if (screen.needsDataPlane()) {
                 append(getString(R.string.mesh_data_plane_off)).append("\n")
@@ -1803,13 +1915,27 @@ class GromActivity : Activity() {
                 append(getString(MeshModel.transportRes(radio.transport))).append(": ")
                 append(
                     when {
-                        !radio.available -> getString(
-                            R.string.mesh_radio_error,
-                            radio.error ?: "not supported"
-                        )
+                        // Left out by the Bluetooth switch: not an error, and
+                        // not "ready" either.
+                        !radio.inUse -> getString(R.string.mesh_radio_off_for_mesh)
+                        // The system radio is off. Grom cannot flip it, so the
+                        // row names the switch the operator has to use.
+                        radio.platformOn == false -> getString(MeshModel.platformOffRes(radio.transport))
                         radio.missingPermissions.isNotEmpty() -> getString(
                             R.string.mesh_radio_missing,
                             radio.missingPermissions.joinToString(", ")
+                        )
+                        // `available` is only a capability: the adapter can still
+                        // refuse to start (advertisement too large, stack busy),
+                        // and that refusal used to read "ready" while nothing was
+                        // sent. Any recorded failure wins over the capability.
+                        radio.error != null -> getString(
+                            R.string.mesh_radio_error,
+                            meshRadioDetail(radio)
+                        )
+                        !radio.available -> getString(
+                            R.string.mesh_radio_error,
+                            getString(R.string.mesh_radio_not_supported)
                         )
                         else -> getString(R.string.mesh_radio_ok)
                     }

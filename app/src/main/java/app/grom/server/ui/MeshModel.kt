@@ -57,7 +57,17 @@ data class MeshNearbyRow(
 
 data class MeshRadioRow(
     val transport: String,
+    /**
+     * Whether the operator's switches let this radio run (D109). A Bluetooth
+     * radio that is left out is not broken and must not be shown as an error.
+     */
+    val inUse: Boolean,
     val available: Boolean,
+    /**
+     * The platform switch measured now: `null` when the radio has none or it
+     * cannot be read. `false` means the operator has the system radio off.
+     */
+    val platformOn: Boolean?,
     val missingPermissions: List<String>,
     val error: String?
 )
@@ -66,6 +76,10 @@ data class MeshScreen(
     val enabled: Boolean,
     val advertise: Boolean,
     val scan: Boolean,
+    /** Whether Grom uses the Bluetooth radios at all (D109). */
+    val bluetooth: Boolean,
+    /** The system Bluetooth switch, measured; null when the phone has none. */
+    val bluetoothOn: Boolean?,
     val dataPlanePort: Int,
     val serverRunning: Boolean,
     val servers: List<MeshServerRow>,
@@ -82,6 +96,13 @@ data class MeshScreen(
      * they cannot open.
      */
     fun needsDataPlane(): Boolean = enabled && dataPlanePort <= 0
+
+    /**
+     * True only when Bluetooth is switched on for the mesh *and* the phone can
+     * use it. The screen then offers the system settings page — never a toggle
+     * of its own, because Android 13+ will not let an app flip the radio.
+     */
+    fun needsSystemBluetooth(): Boolean = bluetooth && bluetoothOn == false
 
     fun measuredAlive(): Int = servers.count { it.state == "alive" }
 }
@@ -120,6 +141,10 @@ object MeshModel {
             enabled = root["enabled"] as? Boolean ?: false,
             advertise = root["advertise"] as? Boolean ?: false,
             scan = root["scan"] as? Boolean ?: false,
+            // An older engine omits the key; "on" keeps the pre-D109
+            // behaviour rather than silently hiding a transport.
+            bluetooth = root["bluetooth"] as? Boolean ?: true,
+            bluetoothOn = root["bluetoothOn"] as? Boolean,
             dataPlanePort = (root["dataPlanePort"] as? Number)?.toInt() ?: 0,
             serverRunning = root["serverRunning"] as? Boolean ?: false,
             servers = objects(root["servers"]).map { server ->
@@ -159,7 +184,9 @@ object MeshModel {
             radios = objects(root["radios"]).map { radio ->
                 MeshRadioRow(
                     transport = radio["transport"] as? String ?: "",
+                    inUse = radio["inUse"] as? Boolean ?: true,
                     available = radio["available"] as? Boolean ?: false,
+                    platformOn = radio["platformOn"] as? Boolean,
                     missingPermissions = strings(radio["missingPermissions"]),
                     error = (radio["error"] as? String)?.takeIf { it.isNotEmpty() }
                 )
@@ -175,12 +202,47 @@ object MeshModel {
 
     fun stateRes(server: MeshServerRow): Int = FleetModel.stateRes(server.state)
 
+    /**
+     * The sentence for "the platform switch this radio needs is off".
+     *
+     * Bluetooth and Wi-Fi Direct have different switches and different pages, so
+     * one message for both would send the operator to the wrong screen.
+     */
+    fun platformOffRes(transport: String): Int = when (transport) {
+        "wifi_direct" -> R.string.mesh_err_wifi_direct_disabled
+        "bluetooth_classic", "bluetooth_le" -> R.string.mesh_err_bluetooth_disabled
+        else -> R.string.mesh_radio_not_supported
+    }
+
     fun transportRes(transport: String): Int = when (transport) {
         "lan" -> R.string.mesh_transport_lan
         "wifi_direct" -> R.string.mesh_transport_wifi_direct
         "bluetooth_classic" -> R.string.mesh_transport_bluetooth_classic
         "bluetooth_le" -> R.string.mesh_transport_bluetooth_le
         else -> R.string.mesh_transport_unknown
+    }
+
+    /**
+     * A radio code turned into a sentence the operator can act on.
+     *
+     * The engine may append the platform's numeric code after a colon (for
+     * example `BLE_ADVERTISE_FAILED:1`); that suffix is the useful part of a
+     * bug report, so the screen shows the sentence and keeps the code visible.
+     * An unknown code returns null and is printed verbatim — never swallowed.
+     */
+    fun radioErrorRes(error: String?): Int? = when (error?.substringBefore(':')?.trim()) {
+        "BLUETOOTH_UNAVAILABLE" -> R.string.mesh_err_bluetooth_unavailable
+        "BLUETOOTH_DISABLED" -> R.string.mesh_err_bluetooth_disabled
+        "BLE_ADVERTISE_FAILED" -> R.string.mesh_err_ble_advertise_failed
+        "BLE_ADVERTISE_UNAVAILABLE" -> R.string.mesh_err_ble_advertise_unavailable
+        "BLE_SCAN_FAILED" -> R.string.mesh_err_ble_scan_failed
+        "BLE_NO_IDENTITY" -> R.string.mesh_err_ble_no_identity
+        "BLUETOOTH_ACCEPT_FAILED" -> R.string.mesh_err_bluetooth_accept_failed
+        "BLUETOOTH_LISTEN_FAILED" -> R.string.mesh_err_bluetooth_listen_failed
+        "WIFI_DIRECT_UNAVAILABLE" -> R.string.mesh_err_wifi_direct_unavailable
+        "WIFI_DIRECT_DISABLED" -> R.string.mesh_err_wifi_direct_disabled
+        "WIFI_DIRECT_DISCOVERY_FAILED" -> R.string.mesh_err_wifi_direct_discovery_failed
+        else -> null
     }
 
     /** `lan, wifi_direct`, or "no measured path" when nothing was seen. */

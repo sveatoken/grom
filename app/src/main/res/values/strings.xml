@@ -711,4 +711,25 @@ Requested: %4$s</string>
     <string name="mesh_transport_bluetooth_le">Bluetooth LE</string>
     <string name="mesh_transport_unknown">unknown carrier</string>
     <string name="mesh_summary">%1$s connected</string>
+    <string name="mesh_bluetooth">Bluetooth</string>
+    <string name="mesh_bluetooth_hint">Bluetooth LE announces this server and Bluetooth Classic carries requests to a phone you have paired with. Android does not let an app switch the radio, so this only decides whether Grom uses it — the system Bluetooth switch stays yours.</string>
+    <string name="mesh_bluetooth_disable">Turn Bluetooth off for the mesh</string>
+    <string name="mesh_bluetooth_enable">Use Bluetooth for the mesh</string>
+    <string name="mesh_bluetooth_on">Bluetooth: on for the mesh</string>
+    <string name="mesh_bluetooth_off">Bluetooth: off for the mesh</string>
+    <string name="mesh_bluetooth_system_off">Bluetooth is switched off in the system, so the Bluetooth radios cannot run. Grom is not allowed to switch it on for you.</string>
+    <string name="mesh_open_bluetooth_settings">Open Bluetooth settings</string>
+    <string name="mesh_radio_off_for_mesh">off — Bluetooth is not used for the server network</string>
+    <string name="mesh_radio_not_supported">not supported on this phone</string>
+    <string name="mesh_err_bluetooth_unavailable">this phone has no Bluetooth adapter</string>
+    <string name="mesh_err_bluetooth_disabled">Bluetooth is switched off in the system</string>
+    <string name="mesh_err_ble_advertise_failed">Bluetooth LE advertising failed — another app may be advertising, or this phone refuses a legacy advertisement</string>
+    <string name="mesh_err_ble_advertise_unavailable">this phone&#8217;s Bluetooth LE cannot advertise</string>
+    <string name="mesh_err_ble_scan_failed">Bluetooth LE scanning failed</string>
+    <string name="mesh_err_ble_no_identity">the device identity is not ready yet — open Devices once, then try again</string>
+    <string name="mesh_err_bluetooth_accept_failed">the Bluetooth link closed — turn discovery off and on again</string>
+    <string name="mesh_err_bluetooth_listen_failed">this phone refused the Bluetooth listener</string>
+    <string name="mesh_err_wifi_direct_unavailable">this phone has no Wi-Fi Direct</string>
+    <string name="mesh_err_wifi_direct_disabled">Wi-Fi Direct needs Wi-Fi switched on</string>
+    <string name="mesh_err_wifi_direct_discovery_failed">Wi-Fi Direct discovery failed</string>
 </resources>
