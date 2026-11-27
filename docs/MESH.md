@@ -187,6 +187,12 @@ different decisions.
 | `MESH_BAD_RESPONSE` | caller | the peer answered non-JSON or an unusable document |
 | `SERVICE_NOT_SHARED` | peer | the operator's share list does not open this service |
 
+An identity that changed under a pairing is not a mesh code: the connect document
+is unsigned, so the mesh cannot prove it. The paired-device probe reports it as
+`PEER_IDENTITY_CHANGED` in `Devices` (S1-R043), and the roster then measures the
+server as `unreachable`. A call to it fails closed — the reset device forgot this
+device's key, so it answers `MESH_UNAUTHORIZED` — and the operator re-pairs.
+
 ### 8.1a Radio codes
 
 These are the per-radio row codes. They are not mesh failures: a radio row is a
@@ -206,12 +212,6 @@ unknown code is printed verbatim rather than hidden).
 | `WIFI_DIRECT_DISABLED` | Wi-Fi is off, so Wi-Fi Direct cannot run | turn Wi-Fi on |
 | `WIFI_DIRECT_UNAVAILABLE` | no Wi-Fi Direct hardware | nothing |
 | `WIFI_DIRECT_DISCOVERY_FAILED` | the platform refused peer discovery | scan again |
-
-An identity that changed under a pairing is not a mesh code: the connect document
-is unsigned, so the mesh cannot prove it. The paired-device probe reports it as
-`PEER_IDENTITY_CHANGED` in `Devices` (S1-R043), and the roster then measures the
-server as `unreachable`. A call to it fails closed — the reset device forgot this
-device's key, so it answers `MESH_UNAUTHORIZED` — and the operator re-pairs.
 
 ## 8.1 Which carrier to trust for what
 
