@@ -4176,7 +4176,15 @@ class GromActivity : Activity() {
                         )
                     }
                     else -> {
-                        toast(sshErrorText(parsed?.get("code") as? String))
+                        // The server's own list of accepted methods, when it
+                        // answered with one (D110). Absent means it was not
+                        // measured, and the generic sentence stands.
+                        val offered = (parsed?.get("authMethods") as? List<*>)
+                            ?.filterIsInstance<String>()
+                            ?: emptyList()
+                        toast(
+                            sshErrorText(parsed?.get("code") as? String, offered)
+                        )
                         refreshNow()
                     }
                 }
@@ -4189,8 +4197,15 @@ class GromActivity : Activity() {
      * lists every one), but an operator should not have to read a document to
      * learn that the password was rejected.
      */
-    private fun sshErrorText(code: String?): String = when (code) {
+    private fun sshErrorText(code: String?, authMethods: List<String> = emptyList()): String = when (code) {
         "SSH_AUTH_FAILED" -> getString(R.string.ssh_err_auth)
+        // The server said which methods it accepts and the stored one is not
+        // among them: "wrong password" would be a guess, and a wrong one.
+        "SSH_AUTH_METHOD_NOT_ALLOWED" -> if (authMethods.isEmpty()) {
+            getString(R.string.ssh_err_auth)
+        } else {
+            getString(R.string.ssh_err_auth_methods, authMethods.joinToString(", "))
+        }
         "SSH_HOST_UNKNOWN" -> getString(R.string.ssh_err_host_unknown)
         "SSH_HOST_UNREACHABLE" -> getString(R.string.ssh_err_host_unreachable)
         "SSH_TIMEOUT" -> getString(R.string.ssh_err_timeout)

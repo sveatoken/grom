@@ -283,6 +283,7 @@
     <string name="ssh_current_set">This is now your current server</string>
     <string name="ssh_current_failed">Could not change the current server</string>
     <string name="ssh_err_auth">The server rejected the username or the password.</string>
+    <string name="ssh_err_auth_methods">This server does not accept that kind of login. It offers: %1$s. Most VPS images disable password login for root \u2014 either switch this server to an SSH key, or allow it on the VPS.</string>
     <string name="ssh_err_host_unknown">That host name could not be resolved. Check the spelling, or use the IP address.</string>
     <string name="ssh_err_host_unreachable">Nothing accepted a connection on that address and port. Is sshd running, and is the port open?</string>
     <string name="ssh_err_timeout">No answer in time. A firewall or the wrong port is the usual cause.</string>
