@@ -93,6 +93,7 @@ object MeshDocuments {
             "enabled" to settings.enabled,
             "advertise" to settings.advertise,
             "scan" to settings.scan,
+            "bluetooth" to settings.bluetooth,
             "servers" to servers,
             "nearby" to near
         )

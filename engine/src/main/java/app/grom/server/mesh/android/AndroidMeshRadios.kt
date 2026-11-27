@@ -127,6 +127,9 @@ internal class BleMeshRadio(
     override fun isAvailable(): Boolean =
         adapter?.isEnabled == true && adapter?.isMultipleAdvertisementSupported == true
 
+    /** Measured, never assumed: the operator owns this switch, not Grom. */
+    override fun platformEnabled(): Boolean? = adapter?.isEnabled
+
     override fun missingPermissions(): List<String> =
         AndroidMeshPermissions.missing(context, AndroidMeshPermissions.BLE)
 
@@ -134,8 +137,15 @@ internal class BleMeshRadio(
     override fun start(sink: (MeshCandidate) -> Unit): Boolean {
         this.sink = sink
         val adapter = adapter
-        if (adapter == null || !adapter.isEnabled) {
-            lastError = "BLE_UNAVAILABLE"
+        if (adapter == null) {
+            lastError = "BLUETOOTH_UNAVAILABLE"
+            return false
+        }
+        // Two different facts, two different sentences: no adapter at all is
+        // "this phone cannot", a switched-off radio is "you turned it off and
+        // Android will not let Grom turn it back on" (D109).
+        if (!adapter.isEnabled) {
+            lastError = "BLUETOOTH_DISABLED"
             return false
         }
         if (missingPermissions().isNotEmpty()) {
@@ -150,8 +160,17 @@ internal class BleMeshRadio(
 
     @SuppressLint("MissingPermission")
     private fun startAdvertising(adapter: BluetoothAdapter) {
-        val node = nodeId() ?: return
-        val payload = BleAdvertisement.encode(node, port(), dataPlaneUp()) ?: return
+        // A null node id means the identity is not ready yet. Advertising an
+        // empty payload would be worse than not advertising: a scanner would
+        // drop it and the screen would claim the radio works.
+        val node = nodeId() ?: run {
+            lastError = "BLE_NO_IDENTITY"
+            return
+        }
+        val payload = BleAdvertisement.encode(node, port(), dataPlaneUp()) ?: run {
+            lastError = "BLE_NO_IDENTITY"
+            return
+        }
         val radio = adapter.bluetoothLeAdvertiser ?: run {
             lastError = "BLE_ADVERTISE_UNAVAILABLE"
             return
@@ -164,14 +183,23 @@ internal class BleMeshRadio(
             .setConnectable(false)
             .setTimeout(0)
             .build()
+        // Only the service **data** field, never the UUID list as well: the
+        // legacy PDU is 31 bytes and the two together are 47, which the stack
+        // rejects with ADVERTISE_FAILED_DATA_TOO_LARGE while the screen still
+        // says "ready". The data field names the same UUID, so the scan filters
+        // below still match. The arithmetic lives in BleAdvertisement and is
+        // pinned by a test so this cannot drift back.
         val data = AdvertiseData.Builder()
-            .addServiceUuid(uuid)
             .addServiceData(uuid, payload)
             .setIncludeDeviceName(false)
+            .setIncludeTxPowerLevel(false)
             .build()
         val callback = object : AdvertiseCallback() {
             override fun onStartFailure(errorCode: Int) {
-                lastError = "BLE_ADVERTISE_FAILED"
+                // The code is kept: it is the difference between "another app
+                // is already advertising" and "this phone refuses legacy
+                // advertising at all", and neither is a guess.
+                lastError = "BLE_ADVERTISE_FAILED:$errorCode"
             }
         }
         advertiseCallback = callback
@@ -212,18 +240,39 @@ internal class BleMeshRadio(
             }
 
             override fun onScanFailed(errorCode: Int) {
-                lastError = "BLE_SCAN_FAILED"
+                lastError = "BLE_SCAN_FAILED:$errorCode"
             }
         }
         scanCallback = callback
-        val filter = ScanFilter.Builder()
-            .setServiceUuid(ParcelUuid.fromString(BleAdvertisement.SERVICE_UUID))
-            .build()
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_POWER)
             .build()
-        runCatching { radio.startScan(listOf(filter), settings, callback) }
+        runCatching { radio.startScan(scanFilters(), settings, callback) }
             .onFailure { lastError = "BLE_SCAN_FAILED" }
+    }
+
+    /**
+     * Two filters, OR-ed by the platform.
+     *
+     * A v0.19.1 advertisement carries the payload as service *data* only,
+     * because the UUID list cannot also fit the 31-byte legacy PDU. The service
+     * *UUID* filter is kept second so an older Grom that still advertises the
+     * list is still seen after an update.
+     *
+     * The data filter uses a zero-length payload and a zero-length mask: with a
+     * mask, the platform compares only `min(data, record)` bytes, which is zero,
+     * so it matches any service data for this UUID. Passing a zero-length
+     * payload without a mask would instead require a zero-length record and
+     * never match a real eight-byte one.
+     */
+    private fun scanFilters(): List<ScanFilter> {
+        val uuid = ParcelUuid.fromString(BleAdvertisement.SERVICE_UUID)
+        return listOf(
+            ScanFilter.Builder()
+                .setServiceData(uuid, ByteArray(0), ByteArray(0))
+                .build(),
+            ScanFilter.Builder().setServiceUuid(uuid).build()
+        )
     }
 
     @SuppressLint("MissingPermission")
@@ -250,11 +299,7 @@ internal class BleMeshRadio(
         runCatching { radio.stopScan(callback) }
         runCatching {
             radio.startScan(
-                listOf(
-                    ScanFilter.Builder()
-                        .setServiceUuid(ParcelUuid.fromString(BleAdvertisement.SERVICE_UUID))
-                        .build()
-                ),
+                scanFilters(),
                 ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(),
                 callback
             )
@@ -302,6 +347,16 @@ internal class WifiDirectMeshRadio(
     override fun isAvailable(): Boolean = context.packageManager.hasSystemFeature(
         PackageManager.FEATURE_WIFI_DIRECT
     )
+
+    /**
+     * Wi-Fi Direct needs Wi-Fi on, and like Bluetooth that switch belongs to the
+     * operator. `isAvailable()` only proves the hardware exists, so the screen
+     * needs this to say "turn Wi-Fi on" instead of showing a discovery row that
+     * can never produce a sighting (D109).
+     */
+    override fun platformEnabled(): Boolean? = runCatching {
+        context.getSystemService(android.net.wifi.WifiManager::class.java)?.isWifiEnabled
+    }.getOrNull()
 
     override fun missingPermissions(): List<String> =
         AndroidMeshPermissions.missing(context, AndroidMeshPermissions.WIFI_DIRECT)
@@ -563,14 +618,22 @@ internal class AndroidRfcommServer(
         return manager.adapter?.isEnabled == true
     }
 
+    /** Measured, never assumed: the operator owns this switch, not Grom. */
+    override fun platformEnabled(): Boolean? =
+        context.getSystemService(BluetoothManager::class.java)?.adapter?.isEnabled
+
     override fun missingPermissions(): List<String> =
         AndroidMeshPermissions.missing(context, AndroidMeshPermissions.CLASSIC)
 
     @SuppressLint("MissingPermission")
     override fun start(sink: (MeshCandidate) -> Unit): Boolean {
         if (running) return true
-        if (!isAvailable()) {
+        if (context.getSystemService(BluetoothManager::class.java)?.adapter == null) {
             lastError = "BLUETOOTH_UNAVAILABLE"
+            return false
+        }
+        if (platformEnabled() == false) {
+            lastError = "BLUETOOTH_DISABLED"
             return false
         }
         if (missingPermissions().isNotEmpty()) {

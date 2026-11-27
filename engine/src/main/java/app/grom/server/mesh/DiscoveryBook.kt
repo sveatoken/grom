@@ -101,6 +101,22 @@ class DiscoveryBook(
         entries.remove(key)
     }
 
+    /**
+     * Drops every sighting that does not satisfy [keep], returning how many went
+     * (D109).
+     *
+     * Used when the operator switches a carrier off: a Bluetooth row that is
+     * still on screen after the switch would keep offering a pairing that can
+     * no longer be dialled. Expiry alone would eventually hide it, but "already
+     * turned off" must not look like "still nearby" for two more minutes.
+     */
+    @Synchronized
+    fun retain(keep: (MeshCandidate) -> Boolean): Int {
+        val before = entries.size
+        entries.entries.removeAll { !keep(it.value) }
+        return before - entries.size
+    }
+
     @Synchronized
     fun clear() {
         entries.clear()

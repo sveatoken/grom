@@ -57,6 +57,39 @@ class MeshSettingsTest {
     }
 
     @Test
+    fun `bluetooth is used for the mesh until an operator turns it off`() {
+        // The default is "on" so an upgrade does not silently remove a
+        // transport that discovery has always started (D109).
+        assertTrue(MeshSettings().bluetooth)
+        val store = MeshSettingsStore(File(temp.root, MeshSettings.FILE_NAME))
+        store.save(MeshSettings(enabled = true, bluetooth = false))
+        val loaded = store.load()
+        assertTrue(loaded.enabled)
+        assertFalse(loaded.bluetooth)
+        assertNull(store.lastError)
+    }
+
+    @Test
+    fun `turning bluetooth off leaves discovery on`() {
+        val next = MeshSettings(enabled = true)
+            .apply(JsonParser.parseObjectOrNull("""{"bluetooth":false}""")!!)
+        assertNotNull(next)
+        assertFalse(next!!.bluetooth)
+        assertTrue(next.enabled)
+        assertTrue(next.advertise)
+        assertTrue(next.scan)
+    }
+
+    @Test
+    fun `an older settings file without the key keeps bluetooth on`() {
+        val file = File(temp.root, MeshSettings.FILE_NAME)
+        file.writeText("""{"enabled":true,"advertise":true,"scan":true}""")
+        val loaded = MeshSettingsStore(file).load()
+        assertTrue(loaded.enabled)
+        assertTrue(loaded.bluetooth)
+    }
+
+    @Test
     fun `a corrupt file fails closed and is reported`() {
         val file = File(temp.root, MeshSettings.FILE_NAME)
         file.writeText("{not json")

@@ -18,13 +18,26 @@ data class MeshSettings(
     /** Send a signed LAN beacon while the server runs. */
     val advertise: Boolean = true,
     /** Listen for beacons and run the platform radios. */
-    val scan: Boolean = true
+    val scan: Boolean = true,
+    /**
+     * Whether the Bluetooth radios (LE and Classic) take part (D109).
+     *
+     * This is **not** the system Bluetooth switch: Android 13+ forbids an app
+     * from calling `BluetoothAdapter.enable()`/`disable()`, and Grom never asks
+     * for it. It only decides whether *Grom* uses Bluetooth at all, so an
+     * operator who wants discovery over the network alone can leave the radio
+     * out without turning discovery off. The default is `true` because turning
+     * discovery on has always started these radios — an upgrade must not remove
+     * a transport silently.
+     */
+    val bluetooth: Boolean = true
 ) {
 
     fun toJson(): Map<String, Any?> = linkedMapOf(
         "enabled" to enabled,
         "advertise" to advertise,
-        "scan" to scan
+        "scan" to scan,
+        "bluetooth" to bluetooth
     )
 
     /**
@@ -39,7 +52,8 @@ data class MeshSettings(
         return MeshSettings(
             enabled = bool("enabled", enabled) ?: return null,
             advertise = bool("advertise", advertise) ?: return null,
-            scan = bool("scan", scan) ?: return null
+            scan = bool("scan", scan) ?: return null,
+            bluetooth = bool("bluetooth", bluetooth) ?: return null
         )
     }
 

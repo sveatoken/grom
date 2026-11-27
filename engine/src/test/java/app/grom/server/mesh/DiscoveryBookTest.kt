@@ -87,6 +87,19 @@ class DiscoveryBookTest {
     }
 
     @Test
+    fun `retain drops exactly the sightings a switch turned off`() {
+        book.offer(candidate("0000000000000001"))
+        book.offer(candidate("0000000000000002", transport = MeshTransport.BLUETOOTH_LE))
+        assertEquals(2, book.size())
+        val dropped = book.retain { !it.transport.isBluetooth }
+        assertEquals(1, dropped)
+        assertEquals(1, book.size())
+        assertEquals(MeshTransport.LAN, book.list().single().transport)
+        // Nothing left to drop is not an error.
+        assertEquals(0, book.retain { !it.transport.isBluetooth })
+    }
+
+    @Test
     fun `an unsigned BLE sighting with a prefix is a candidate with no address`() {
         assertTrue(
             book.offer(

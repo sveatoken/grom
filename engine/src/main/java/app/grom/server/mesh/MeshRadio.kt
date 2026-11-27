@@ -20,6 +20,18 @@ interface MeshRadio {
 
     fun isAvailable(): Boolean
 
+    /**
+     * Whether the platform switch this radio depends on is on, measured now.
+     *
+     * `null` means the radio has no such switch (the LAN carrier) or it cannot
+     * be read. Bluetooth reports `adapter.isEnabled`; Wi-Fi Direct reports
+     * whether Wi-Fi is on. A `false` here is a **fact to show**, not something
+     * Grom may change: Android 13+ forbids an app from calling
+     * `BluetoothAdapter.enable()`/`disable()`, so the screen offers the system
+     * settings instead of flipping the radio behind the operator's back.
+     */
+    fun platformEnabled(): Boolean? = null
+
     /** Platform permission names this radio still needs; empty when ready. */
     fun missingPermissions(): List<String>
 

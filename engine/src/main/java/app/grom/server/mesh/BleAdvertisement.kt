@@ -4,9 +4,25 @@ package app.grom.server.mesh
 /**
  * The BLE advertisement that says "a Grom server is here" (D99).
  *
- * A legacy advertisement is 31 bytes in total: three go to the flags, eighteen
- * to a 128-bit service data field, which leaves ten. The payload is therefore
- * eight bytes and deliberately says no more than it has to:
+ * A legacy advertisement is **31 bytes in total**, and the budget is spent like
+ * this:
+ *
+ * ```
+ *   flags                   1 length + 1 type + 1 value        =  3
+ *   128-bit service data    1 length + 1 type + 16 uuid + 8    = 26
+ *                                                          -----------
+ *                                                             29 bytes
+ * ```
+ *
+ * That leaves two bytes unused, and there is **no room for the 128-bit service
+ * UUID list as well**: that field alone is `1 + 1 + 16 = 18` bytes and would
+ * make 47. An advertisement over the limit is rejected by the stack with
+ * `ADVERTISE_FAILED_DATA_TOO_LARGE`, and discovery then looks "on" while nothing
+ * is ever sent — which is why the adapters publish the service **data** only
+ * (it already names the UUID) and this file owns the arithmetic the test pins.
+ *
+ * The payload is therefore eight bytes and deliberately says no more than it
+ * has to:
  *
  * ```
  *   [0]      version (1)
@@ -34,6 +50,25 @@ object BleAdvertisement {
 
     const val VERSION: Int = 1
     const val PAYLOAD_BYTES: Int = 8
+
+    /** The legacy advertising PDU limit; anything larger is refused by the stack. */
+    const val LEGACY_AD_MAX_BYTES: Int = 31
+
+    /** Flags AD structure: length, type, one value byte. */
+    const val AD_FLAGS_BYTES: Int = 3
+
+    /** 128-bit service data: length, type, the UUID, then the payload. */
+    const val AD_SERVICE_DATA_128_OVERHEAD_BYTES: Int = 2 + 16
+
+    /** 128-bit service UUID list — 18 bytes this advertisement cannot afford. */
+    const val AD_SERVICE_UUID_128_BYTES: Int = 2 + 16
+
+    /**
+     * The exact size of the advertisement the adapters publish. A test pins it
+     * under [LEGACY_AD_MAX_BYTES]; adding the UUID list would exceed it.
+     */
+    fun legacyAdvertisementBytes(): Int =
+        AD_FLAGS_BYTES + AD_SERVICE_DATA_128_OVERHEAD_BYTES + PAYLOAD_BYTES
 
     const val FLAG_DATA_PLANE_UP: Int = 0x01
 

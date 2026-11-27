@@ -100,14 +100,23 @@ class MeshService(
         val raw = JsonParser.parseObjectOrNull(body)
             ?: throw ApiException(400, "BAD_MESH_CONFIG", "body must be a JSON object")
         val next = settings.apply(raw)
-            ?: throw ApiException(400, "BAD_MESH_CONFIG", "enabled, advertise and scan are booleans")
+            ?: throw ApiException(400, "BAD_MESH_CONFIG", "enabled, advertise, scan and bluetooth are booleans")
         settingsStore.save(next)
+        val droppedBluetooth = if (settings.bluetooth && !next.bluetooth) {
+            book.retain { !it.transport.isBluetooth }
+        } else {
+            0
+        }
         settings = next
         if (running) {
             stopComponents()
             if (next.enabled) startComponents()
         }
-        audit("mesh.configure", "enabled=${next.enabled} advertise=${next.advertise} scan=${next.scan}")
+        audit(
+            "mesh.configure",
+            "enabled=${next.enabled} advertise=${next.advertise} scan=${next.scan} " +
+                "bluetooth=${next.bluetooth} droppedBluetooth=$droppedBluetooth"
+        )
         return statusJson()
     }
 
@@ -120,7 +129,7 @@ class MeshService(
         if (!settings.enabled) {
             throw ApiException(409, "MESH_DISABLED", "turn the server network on first")
         }
-        for (radio in radios) {
+        for (radio in activeRadios()) {
             runCatching { radio.scanNow() }
         }
         val line = beaconLine()
@@ -170,6 +179,7 @@ class MeshService(
             "enabled" to settings.enabled,
             "advertise" to settings.advertise,
             "scan" to settings.scan,
+            "bluetooth" to settings.bluetooth,
             "generatedAtMs" to now,
             "local" to linkedMapOf<String, Any?>(
                 "nodeId" to identityOrNull()?.nodeId,
@@ -192,13 +202,22 @@ class MeshService(
                 "enabled" to settings.enabled,
                 "advertise" to settings.advertise,
                 "scan" to settings.scan,
+                "bluetooth" to settings.bluetooth,
+                // Measured, never assumed: null when the phone has no adapter,
+                // false when the operator has the system radio off (which Grom
+                // may not change itself), true when it is on right now.
+                "bluetoothOn" to bluetoothOn(),
                 "identity" to identityOrNull()?.toJson(),
                 "dataPlanePort" to localPort(),
                 "serverRunning" to serverRunning(),
                 "radios" to radios.map { radio ->
                     linkedMapOf<String, Any?>(
                         "transport" to radio.transport.wireName,
+                        // Whether *this* switch lets the radio run. A radio that
+                        // is left out is not an error and is not reported as one.
+                        "inUse" to radioInUse(radio),
                         "available" to radio.isAvailable(),
+                        "platformOn" to radio.platformEnabled(),
                         "missingPermissions" to radio.missingPermissions(),
                         "error" to radio.lastError
                     )
@@ -270,6 +289,26 @@ class MeshService(
 
     private fun identityOrNull(): NodeIdentity? = runCatching { identityStore.identity() }.getOrNull()
 
+    /** Whether the current switches let [radio] run (D109). */
+    private fun radioInUse(radio: MeshRadio): Boolean =
+        settings.bluetooth || !radio.transport.isBluetooth
+
+    private fun activeRadios(): List<MeshRadio> = radios.filter { radioInUse(it) }
+
+    /**
+     * The system Bluetooth switch, measured from whichever Bluetooth radio can
+     * read it; `null` on a phone without an adapter. Never cached: the operator
+     * can turn the radio off while the screen is open.
+     */
+    private fun bluetoothOn(): Boolean? {
+        for (radio in radios) {
+            if (!radio.transport.isBluetooth) continue
+            val measured = radio.platformEnabled() ?: continue
+            return measured
+        }
+        return null
+    }
+
     private fun startComponents() {
         lastError = null
         if (beacon != null && (settings.advertise || settings.scan)) {
@@ -280,7 +319,7 @@ class MeshService(
             }
         }
         if (settings.scan) {
-            for (radio in radios) {
+            for (radio in activeRadios()) {
                 val started = runCatching { radio.start { candidate -> offer(candidate) } }
                     .getOrDefault(false)
                 if (!started && radio.lastError != null) lastError = radio.lastError

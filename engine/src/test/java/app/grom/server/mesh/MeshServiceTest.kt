@@ -12,6 +12,7 @@ import app.grom.server.superserver.net.HttpJsonResponse
 import app.grom.server.superserver.net.JsonTransport
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -39,14 +40,17 @@ class MeshServiceTest {
             sealed.removePrefix("s:").takeIf { sealed.startsWith("s:") }
     }
 
-    private class FakeRadio : MeshRadio {
-        override val transport: MeshTransport = MeshTransport.LAN
+    private class FakeRadio(
+        override val transport: MeshTransport = MeshTransport.LAN,
+        private val platform: Boolean? = null
+    ) : MeshRadio {
         var started = 0
         var stopped = 0
         var scans = 0
         var sink: ((MeshCandidate) -> Unit)? = null
         override var lastError: String? = null
         override fun isAvailable(): Boolean = true
+        override fun platformEnabled(): Boolean? = platform
         override fun missingPermissions(): List<String> = emptyList()
 
         override fun start(sink: (MeshCandidate) -> Unit): Boolean {
@@ -88,7 +92,9 @@ class MeshServiceTest {
     private val radio = FakeRadio()
     private val transport = FakeTransport()
 
-    private fun harness(): Triple<MeshService, PeerStore, NodeIdentityStore> {
+    private fun harness(
+        radios: List<MeshRadio> = listOf(radio)
+    ): Triple<MeshService, PeerStore, NodeIdentityStore> {
         val home = temp.newFolder()
         val identityStore = NodeIdentityStore(File(home, NodeIdentityStore.FILE_NAME), Box())
         identityStore.loadOrCreate("Phone A")
@@ -99,7 +105,7 @@ class MeshServiceTest {
             peers = peers,
             settingsStore = settings,
             caller = MeshCaller(transport = transport),
-            radios = listOf(radio),
+            radios = radios,
             localServices = { setOf("echo") },
             localPort = { 47002 },
             serverRunning = { true }
@@ -194,6 +200,116 @@ class MeshServiceTest {
             "MESH_UNKNOWN_SERVER",
             (unknown.payload["error"] as Map<*, *>)["code"]
         )
+    }
+
+    @Test
+    fun `a bluetooth switch that is off leaves its radios out without calling them broken`() {
+        val lan = FakeRadio(MeshTransport.LAN)
+        val le = FakeRadio(MeshTransport.BLUETOOTH_LE)
+        val classic = FakeRadio(MeshTransport.BLUETOOTH_CLASSIC)
+        val (service, _, _) = harness(listOf(lan, le, classic))
+        service.start()
+        service.configureJson("""{"enabled":true,"bluetooth":false}""")
+
+        // The network carriers run; the Bluetooth ones are never started, but
+        // they are also not reported as failures.
+        assertEquals(1, lan.started)
+        assertEquals(0, le.started)
+        assertEquals(0, classic.started)
+
+        val status = JsonParser.parseObjectOrNull(service.statusJson())!!
+        assertEquals(false, status["bluetooth"])
+        val rows = (status["radios"] as List<*>).map { it as Map<*, *> }
+        assertEquals(false, rows.first { it["transport"] == "bluetooth_le" }["inUse"])
+        assertEquals(false, rows.first { it["transport"] == "bluetooth_classic" }["inUse"])
+        assertEquals(true, rows.first { it["transport"] == "lan" }["inUse"])
+    }
+
+    @Test
+    fun `turning bluetooth back on starts its radios again`() {
+        val le = FakeRadio(MeshTransport.BLUETOOTH_LE)
+        val (service, _, _) = harness(listOf(le))
+        service.start()
+        service.configureJson("""{"enabled":true,"bluetooth":false}""")
+        assertEquals(0, le.started)
+        service.configureJson("""{"bluetooth":true}""")
+        assertEquals(1, le.started)
+        val status = JsonParser.parseObjectOrNull(service.statusJson())!!
+        assertEquals(true, status["bluetooth"])
+        // A fake radio has no platform switch to read: null, never a guess.
+        assertNull(status["bluetoothOn"])
+    }
+
+    @Test
+    fun `the system switch is measured and reported, not assumed`() {
+        val off = FakeRadio(MeshTransport.BLUETOOTH_LE, platform = false)
+        val (service, _, _) = harness(listOf(off))
+        service.start()
+        service.configureJson("""{"enabled":true}""")
+        val status = JsonParser.parseObjectOrNull(service.statusJson())!!
+        assertEquals(false, status["bluetoothOn"])
+        val row = (status["radios"] as List<*>)
+            .map { it as Map<*, *> }
+            .first { it["transport"] == "bluetooth_le" }
+        assertEquals(false, row["platformOn"])
+
+        val on = FakeRadio(MeshTransport.BLUETOOTH_CLASSIC, platform = true)
+        val (other, _, _) = harness(listOf(on))
+        other.start()
+        other.configureJson("""{"enabled":true}""")
+        assertEquals(
+            true,
+            JsonParser.parseObjectOrNull(other.statusJson())!!["bluetoothOn"]
+        )
+    }
+
+    @Test
+    fun `a carrier switched off stops offering its sightings`() {
+        val le = FakeRadio(MeshTransport.BLUETOOTH_LE)
+        val lan = FakeRadio(MeshTransport.LAN)
+        val (service, _, _) = harness(listOf(lan, le))
+        service.start()
+        service.configureJson("""{"enabled":true}""")
+
+        val now = System.currentTimeMillis()
+        le.sink?.invoke(
+            MeshCandidate(
+                key = "ignored",
+                nodeId = null,
+                nodeIdPrefix = "11111111",
+                publicKey = null,
+                label = null,
+                transport = MeshTransport.BLUETOOTH_LE,
+                address = "",
+                port = 47002,
+                signedBeacon = false,
+                firstSeenMs = now,
+                lastSeenMs = now
+            )
+        )
+        lan.sink?.invoke(
+            MeshCandidate(
+                key = "ignored",
+                nodeId = "0123456789abcdef",
+                nodeIdPrefix = "01234567",
+                publicKey = null,
+                label = null,
+                transport = MeshTransport.LAN,
+                address = "http://192.168.1.30:47002",
+                port = 47002,
+                signedBeacon = true,
+                firstSeenMs = now,
+                lastSeenMs = now
+            )
+        )
+        val before = JsonParser.parseObjectOrNull(service.statusJson())!!
+        assertEquals(2, (before["nearby"] as List<*>).size)
+
+        service.configureJson("""{"bluetooth":false}""")
+        val nearby = JsonParser.parseObjectOrNull(service.statusJson())!!
+            .let { it["nearby"] as List<*> }
+        assertEquals(1, nearby.size)
+        assertEquals("lan", (nearby.first() as Map<*, *>)["transport"])
     }
 
     @Test

@@ -4,6 +4,7 @@ package app.grom.server.mesh
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -43,6 +44,23 @@ class BleAdvertisementTest {
         // The bound is the point: BLE is a discovery carrier (D99).
         assertEquals(8, BleAdvertisement.PAYLOAD_BYTES)
         assertNull(BleAdvertisement.decode(ByteArray(64) { 1 }))
+    }
+
+    @Test
+    fun `the advertisement fits a legacy pdu and cannot carry the uuid list too`() {
+        // The regression this pins: adding the 128-bit service UUID *list* next
+        // to the service data field makes the PDU 47 bytes, and the stack
+        // rejects it with ADVERTISE_FAILED_DATA_TOO_LARGE while the screen still
+        // says "ready". The adapter publishes the data field only.
+        val bytes = BleAdvertisement.legacyAdvertisementBytes()
+        assertTrue(
+            "advertisement is $bytes bytes, limit ${BleAdvertisement.LEGACY_AD_MAX_BYTES}",
+            bytes <= BleAdvertisement.LEGACY_AD_MAX_BYTES
+        )
+        assertTrue(
+            bytes + BleAdvertisement.AD_SERVICE_UUID_128_BYTES >
+                BleAdvertisement.LEGACY_AD_MAX_BYTES
+        )
     }
 
     @Test

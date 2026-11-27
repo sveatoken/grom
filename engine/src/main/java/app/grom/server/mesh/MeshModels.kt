@@ -23,6 +23,17 @@ enum class MeshTransport(val wireName: String, val dataCapable: Boolean) {
     /** A BLE advertisement: enough for a name and a port, never for a call. */
     BLUETOOTH_LE("bluetooth_le", false);
 
+    /**
+     * True for the two carriers the Bluetooth switch governs (D109).
+     *
+     * Kept as a computed property rather than a third constructor argument so
+     * the entry shapes stay exactly what the policy check pins, and so adding a
+     * transport cannot forget the flag silently: the default is "not
+     * Bluetooth".
+     */
+    val isBluetooth: Boolean
+        get() = this == BLUETOOTH_CLASSIC || this == BLUETOOTH_LE
+
     companion object {
         fun fromWire(raw: String?): MeshTransport? =
             entries.firstOrNull { it.wireName == raw?.trim() }
