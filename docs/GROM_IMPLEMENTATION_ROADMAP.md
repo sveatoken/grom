@@ -24,6 +24,7 @@ Task ids (`T-nn`) match §U of the master plan.
 | **1L — universal client connect: discovery, scoped services, a thin SDK** | **done** | `GET /grom/v1/connect` (D91), `services.read`/`services.call` + `Plugin.scopedOps` (D92), `app.grom.sdk.connect` HTTP client + compiled `examples/connect` (D93); `docs/specs/S6-client-connect.md` |
 | **1M — server network: discovery, a roster and scoped server-to-server calls** | **done** | `GET /v1/mesh` + `POST /v1/mesh/call` (D99, D100), per-peer service shares (D101), LAN beacon + BLE advert + Wi-Fi Direct DNS-SD + secure RFCOMM `bt://` (D102), untrusted bounded discovery (D103); `docs/MESH.md`, `docs/specs/S8-server-mesh.md`; API **11** |
 | **1N — an SSH/VPS you can actually diagnose, and more than one** | **done** | stage-based failure codes and keyboard-interactive passwords (D105), `sshVerify` without the data plane (D106), one current server and four live tunnels (D107); API **12**; `docs/SSH-BRIDGE.md` |
+| **1O — the tunnel carries only what is bound, and says what the server accepts** | **done** | the forward reaches the endpoint the data plane is bound to, LAN included (D111), and an auth failure names the methods the server offered (D110); `docs/SSH-BRIDGE.md` §7a |
 | **1B — core hardening** | **next** | `apps/AppManifest.kt`, `apps/PortAllocator.kt`, `apps/HealthGate.kt`, `apps/ReleaseStore.kt`, `proc/ChildProcess.kt`, `adapters/`, `auth/Scope.kt` — none exist yet |
 | **2 — Application Manager MVP** | **blocked by 1B** | `apps/ApplicationManager.kt`, `apps/AppSupervisor.kt`, the gateway, `/v1/apps` |
 | **3 — runtimes and adapters** | blocked by 2 | `apps/runtime/`, `adapters/`, LND |
@@ -31,7 +32,7 @@ Task ids (`T-nn`) match §U of the master plan.
 | **5 — backup, CLI, advanced** | blocked by 4 | `backup/`, `cli/` |
 | **6 — production** | blocked by 5 | signing key, soak, review |
 
-Current version: `0.19.1` (versionCode 21). The thirteen gates in `tools/run-gates`
+Current version: `0.20.0` (versionCode 22). The thirteen gates in `tools/run-gates`
 are the baseline; every phase below adds tests, not gates that replace them.
 
 **The next concrete action** is T-01 (`apps/AppManifest.kt`), because every later

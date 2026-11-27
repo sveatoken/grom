@@ -356,3 +356,27 @@ MUST be signed and timestamped and MUST be rejected outside a 120-second skew.
 A BLE advertisement MUST NOT carry a request. Every discovery carrier MUST be
 treated as untrusted input: the candidate book MUST be bounded and MUST expire.
 Discovery MUST NOT cause the public data plane to bind a non-loopback address.
+
+### S1-R050 (D110, D111)
+The reverse SSH tunnel (S1-R012, D58) MUST carry only the operator's public data
+plane and MUST NOT be usable to reach any other endpoint on the device:
+
+- The client-side forwarding filter MUST accept a `forwarded-tcpip` channel only
+  for the exact address and port this session asked to expose, and that pair
+  MUST come from the device (`localDataPlane()`), never from the peer.
+- The filter MUST NOT assume the endpoint is loopback: `LAN` and `PUBLIC` binds
+  are supported modes, and a tunnel that reports `CONNECTED` while refusing every
+  forwarded connection is a defect, not a limitation.
+- Agent forwarding, X11, local listens and `direct-tcpip` MUST remain refused.
+
+An authentication failure MUST be reported by the methods the server said it
+accepts, when that reply was actually received:
+
+- The method list MUST be treated as untrusted input: filtered to method-name
+  syntax, bounded in count and length, and used only in a sentence.
+- An empty list means **not measured** and MUST NOT produce a "method
+  disabled" verdict.
+- `keyboard-interactive` MUST count as password login (D105).
+- A server that does not offer the credential's method MUST be distinguished from
+  a rejected credential; the stored secret MUST NOT be retried automatically
+  against another method.

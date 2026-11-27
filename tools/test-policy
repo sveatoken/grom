@@ -503,6 +503,21 @@ check "the mesh never switches the system bluetooth radio" \
 check "the ble advertisement fits a legacy pdu and a refusal is shown" \
   bash -c "! grep -q 'addServiceUuid' $MAIN/mesh/android/AndroidMeshRadios.kt && grep -q 'LEGACY_AD_MAX_BYTES' $MAIN/mesh/BleAdvertisement.kt && grep -q 'legacyAdvertisementBytes' $MAIN/mesh/BleAdvertisement.kt && grep -q 'BLE_ADVERTISE_FAILED:' $MAIN/mesh/android/AndroidMeshRadios.kt && grep -q 'radio.error != null' app/src/main/java/app/grom/server/GromActivity.kt && grep -q 'fun radioErrorRes' app/src/main/java/app/grom/server/ui/MeshModel.kt"
 
+# 81. The forwarded channel may only reach the endpoint the data plane is
+#     actually bound to (D111). A loopback-only filter accepted the forward and
+#     then refused every connection when the data plane was bound to the phone's
+#     LAN address — a green tunnel that carried nothing. The destination comes
+#     from our own request, so the rule stays exactly one endpoint wide.
+check "the forwarded channel may only reach the endpoint we asked for" \
+  bash -c "grep -q 'class SshForwardingPolicy(private val local: Pair<String, Int>?)' $MAIN/ssh/SshTunnelManager.kt && grep -q 'client.forwardingFilter = SshForwardingPolicy(local)' $MAIN/ssh/SshTunnelManager.kt && grep -q 'if (address.port != requested.second) return false' $MAIN/ssh/SshTunnelManager.kt && grep -q 'return canonical(host) == canonical(requested.first)' $MAIN/ssh/SshTunnelManager.kt && ! grep -q 'host == \"127.0.0.1\" || host == \"localhost\"' $MAIN/ssh/SshTunnelManager.kt"
+
+# 82. An auth failure reports the methods the server itself offered, and an empty
+#     list is "not measured", never "nothing is allowed" (D110). Without this a
+#     server that refuses passwords is indistinguishable from a wrong password —
+#     the most common real answer on a Hetzner or Debian image.
+check "an auth failure names the methods the server offered, and empty is not a verdict" \
+  bash -c "grep -q 'class SshAuthMethods' $MAIN/ssh/SshAuthMethods.kt && grep -q 'fun sanitize' $MAIN/ssh/SshAuthMethods.kt && grep -q 'MAX_METHODS' $MAIN/ssh/SshAuthMethods.kt && grep -q 'fun acceptsPassword' $MAIN/ssh/SshAuthMethods.kt && grep -q 'SSH_AUTH_METHOD_NOT_ALLOWED' $MAIN/ssh/SshTunnelManager.kt && grep -q 'if (offered.isNotEmpty())' $MAIN/ssh/SshTunnelManager.kt && grep -q '\"authMethods\"' $MAIN/ServerRuntime.kt && grep -q 'ssh_err_auth_methods' app/src/main/java/app/grom/server/GromActivity.kt"
+
 echo
 TOTAL=$((PASS + FAIL))
 if [ "$FAIL" -ne 0 ]; then

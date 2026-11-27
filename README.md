@@ -467,7 +467,16 @@ so a wrong password is never reported as an unreachable host. **Test
 connection** checks the address, host key and password *without* the public data
 plane, which is exactly the state you are in when a new VPS refuses you. Password
 logins also answer the single non-echoing `keyboard-interactive` prompt that
-OpenSSH asks through PAM. See [`docs/SSH-BRIDGE.md`](docs/SSH-BRIDGE.md).
+OpenSSH asks through PAM.
+
+The tunnel's destination is wherever the data plane is actually bound — loopback,
+the phone's LAN address (what the server network needs) or the wildcard — and
+nothing else: the address comes from the phone, never from the VPS. When a login
+is refused, Grom reports the methods the server itself said it accepts, so
+"this server does not take passwords (it offers: `publickey`)" is not reported as
+a wrong password. [`docs/SSH-BRIDGE.md`](docs/SSH-BRIDGE.md) §7a is the
+field guide for a real VPS: Hetzner and cloud Debian images disable password
+login for `root` by default, and the fix is one tap to a generated key.
 
 ## Super server (public API)
 

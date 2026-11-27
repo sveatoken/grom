@@ -1936,3 +1936,83 @@ than documented around:
 sightings dropped), `DiscoveryBookTest` (`retain`), `BleAdvertisementTest` (the
 31-byte budget), `MeshModelTest` (two facts stay distinct, codes become
 sentences), `tools/test-policy` #79, #80.
+
+---
+
+## D110 — an authentication failure reports the methods the server actually offered
+
+"Wrong password" and "this server does not accept passwords" produce the same
+`SSH_MSG_USERAUTH_FAILURE` on the wire, and until now the same sentence on the
+screen: *"the server rejected the username or the password"*. That is a guess
+wearing the clothes of a measurement, and it is the wrong guess for the most
+common real cause — Hetzner, Debian and Ubuntu cloud images ship
+`PermitRootLogin prohibit-password`, and many add `PasswordAuthentication no`, so
+the password is correct and login is refused anyway.
+
+The server names the methods it will accept in its failure reply. The driver
+keeps that list in a protected field and only writes it to a debug log, so the
+list is captured by observing the reply: `SshAuthMethods` is the driver's own
+`ssh-userauth` factory with one overridden hook, per connection. It changes no
+authentication behaviour.
+
+Rules:
+
+- The list is a **measurement of one attempt**, filtered to `[a-z0-9-]{1,32}`
+  names, de-duplicated, sorted and capped at six, so nothing the server chooses
+  can become a long string in a screen, a status document or a log line.
+- **Empty means "not measured"**, never "nothing is allowed". A refused TCP
+  connection, a handshake failure or a closed session leaves it empty and the
+  old generic diagnosis stands.
+- `keyboard-interactive` counts as a password login (OpenSSH with PAM answers
+  the password there, D105); only a list without both it **and** `password`
+  produces `SSH_AUTH_METHOD_NOT_ALLOWED`. An empty list never does.
+- The same rule applies to a key: a server that does not offer `publickey` is
+  `SSH_AUTH_METHOD_NOT_ALLOWED`, not "the key was rejected".
+- The new code carries `authMethods` in the reply; the screen puts the names in
+  the sentence. The engine keeps writing its own advice in `message`, and the UI
+  still never renders engine prose.
+- If a driver upgrade stops calling the hook, the list stays empty and the
+  diagnosis degrades to the previous, honest sentence. Nothing else changes.
+
+A measured limit, stated rather than hidden: a server that offers
+`keyboard-interactive` still counts as accepting passwords, because OpenSSH with
+PAM answers the password there (D105). A host that disables password login but
+keeps PAM keyboard-interactive therefore still reports `SSH_AUTH_FAILED` — the
+list cannot separate "wrong password" from "PAM refuses this user", and guessing
+would be worse than the generic sentence.
+
+*Enforced by:* `SshAuthMethodsTest` (filtering, bound, "not measured"),
+`SshTunnelManagerTest` (a keys-only server is `SSH_AUTH_METHOD_NOT_ALLOWED` with
+`publickey`; a wrong password stays `SSH_AUTH_FAILED`).
+
+---
+
+## D111 — the forwarded channel may reach the endpoint the data plane is actually bound to
+
+The client-side forwarding filter accepted a `forwarded-tcpip` channel only when
+its destination was loopback on the data-plane port. That was written when the
+data plane could only be loopback. It cannot be bound that way any more: `LAN`
+binds the phone's own site-local address (it is what the mesh needs), and
+`PUBLIC` binds the wildcard.
+
+So with the data plane on the LAN address — a documented, recommended setup —
+the tunnel connected, reported `CONNECTED`, and then refused **every** incoming
+connection, because the destination was `192.168.x.y:47002` and the filter
+wanted `127.0.0.1:47002`. The VPS port accepted TCP and immediately got nothing.
+A green lamp over a dead tunnel is the exact failure this project treats as a
+bug, not a limitation.
+
+The filter now allows exactly **one** endpoint: the address and port this
+connection asked to expose, taken from our own request and never from the
+server. Loopback spellings (`127.0.0.1`, `localhost`, `::1`) are the same
+endpoint; everything else must match the requested host exactly. Agent
+forwarding, X11, local listens and `direct-tcpip` remain refused, and a
+connection with no data plane has no endpoint, so it accepts nothing.
+
+This is not a widening of trust: the destination is chosen by `localDataPlane()`
+on the device, not by the peer, and the port is still the only port that can be
+reached.
+
+*Enforced by:* `SshForwardingPolicyTest` (loopback, a LAN destination, a foreign
+host, a foreign port, a null endpoint), `SshTunnelManagerTest` (bytes really flow
+through a tunnel whose data plane is bound to the LAN address).

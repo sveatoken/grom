@@ -33,9 +33,16 @@ This is enforced twice:
 1. Grom never creates a shell, exec or subsystem channel, and it calls
    `startRemotePortForwarding` exactly once per connection.
 2. The client installs `SshForwardingPolicy`, which accepts a `forwarded-tcpip`
-   channel only when the destination is loopback on the local data-plane port.
-   An accept-all filter would let a compromised server reach any port on the
-   phone; this filter makes that impossible.
+   channel only when the destination is **exactly the endpoint this connection
+   asked to expose** — the address and port returned by `localDataPlane()`, taken
+   from our own request and never from the server. An accept-all filter would let
+   a compromised server reach any port on the phone; this filter makes that
+   impossible.
+3. That endpoint is not assumed to be loopback (D111). The data plane may be
+   bound to loopback, to the phone's LAN address (what the mesh needs) or to the
+   wildcard. A loopback-only rule reported a LAN-bound tunnel as `CONNECTED` and
+   then refused every connection — the wrapper accepted the TCP connection on the
+   VPS and the phone dropped it.
 
 `tools/test-policy` check 29 fails if a shell/exec/subsystem call appears, and
 `SshForwardingPolicyTest` proves the destination rule.
@@ -97,6 +104,7 @@ Fingerprints use the OpenSSH `SHA256:…` form, the same string as
 | Simultaneously active tunnels | 4 (D107) |
 | Connect / auth timeout | 15 s each |
 | Remote bind address | `127.0.0.1` on the VPS |
+| Local destination | whatever `Public access → Bind` is listening on: loopback (default), the phone's LAN address, or the wildcard address (D111) |
 | Forward port | per target, default 47002; **must be unique per host** when several phones use one VPS (41001–41099 by convention, D78) |
 
 Saved servers are not capped: the count limit was removed because adding a
@@ -183,6 +191,7 @@ loopback-only and reach it through the SSH session itself.
 | `SSH_TIMEOUT` | no answer in time — connect, handshake or auth (stage `connect`) |
 | `SSH_HANDSHAKE_FAILED` | something answered but the SSH handshake did not complete (stage `handshake`) |
 | `SSH_AUTH_FAILED` | the server rejected the username, the password or the key (stage `auth`) |
+| `SSH_AUTH_METHOD_NOT_ALLOWED` | the server said which methods it accepts and the stored credential's method is not among them — password login is off, or key login is off (stage `auth`, D110) |
 | `SSH_FORWARD_REFUSED` | the server refused the remote port (already in use, or forwarding forbidden) — distinct from a network failure (D78) |
 | `BAD_FORWARD_PORT_CONFLICT` | the store refused a second target on the same host with the same forward port |
 | `SSH_UNAVAILABLE` | this build has no Ed25519 provider (`preflight` only) |
@@ -241,6 +250,66 @@ when a fresh server will not accept them.
 
 ---
 
+## 7a. When a correct address and password still fail (D110)
+
+Grom can only report what the server actually answers. The list below is the
+order in which a real VPS fails, from the most common down, with the sentence
+Grom now shows and what to do on the machine.
+
+| What the VPS does | Grom says | Fix on the VPS |
+|---|---|---|
+| `PasswordAuthentication no`, or `PermitRootLogin prohibit-password` (the default on Hetzner, Debian and Ubuntu cloud images) | `SSH_AUTH_METHOD_NOT_ALLOWED` — *"does not accept that kind of login. It offers: publickey"* | either switch this server to an SSH key in Grom (**Generate Ed25519 key**, copy the line into `~/.ssh/authorized_keys`), or allow passwords |
+| password accepted but the user is wrong (`debian` vs `root`) | `SSH_AUTH_FAILED`, with the offered methods including `password` | fix the username |
+| `sshd` not running, or a provider firewall (Hetzner Cloud Firewall, `ufw`) dropping 22 | `SSH_HOST_UNREACHABLE` or `SSH_TIMEOUT` | `systemctl status ssh`, open the port in the provider's firewall **and** in the host firewall |
+| a different port than 22 | the same two codes | set the port in the target, and in the firewall |
+| the VPS was rebuilt or re-created | `HOST_KEY_MISMATCH` | *Forget host key*, then confirm the new fingerprint |
+| `AllowTcpForwarding no`, or the remote port is already taken | `SSH_FORWARD_REFUSED` | `AllowTcpForwarding yes`, or choose another forward port |
+| the data plane is off | `DATA_PLANE_NOT_RUNNING` | **Test connection** does not need it (§7) |
+
+### Allowing password login on a VPS
+
+Only if the operator wants it — a key is better and is one tap in Grom:
+
+```bash
+# Debian / Ubuntu / Hetzner images
+sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+sudo sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+sudo systemctl restart ssh            # "ssh", not "sshd", on Debian and Ubuntu
+sudo sshd -t                          # validates the file before you lock yourself out
+```
+
+Some providers put a drop-in in `/etc/ssh/sshd_config.d/` that overrides the main
+file; `sudo sshd -T | grep -E 'passwordauthentication|permitrootlogin'` prints
+what `sshd` will actually use.
+
+### What Grom never does here
+
+It never edits `sshd_config`, never runs a command on the VPS (the session has no
+shell, §1), never retries a rejected password automatically, and never turns a
+"no" into a "maybe" by falling back to another credential. It also never says
+"wrong password" when the server said "no passwords" — that distinction is
+measured from the server's own reply (D110), and when no reply was seen it stays
+silent rather than guessing.
+
+### Why a VPS port cannot be reached from the internet directly
+
+The forward always binds `127.0.0.1` **on the VPS**, by design (D58): a public
+port opened by a phone would be an inbound listener the operator never asked the
+VPS to have. `GatewayPorts` therefore does not change anything, and
+`curl http://<vps-ip>:47002/` will not work no matter what `sshd_config` says.
+The public entry point is a reverse proxy on the VPS — Caddy, nginx, or a
+Cloudflare Tunnel pointed at `127.0.0.1:47002` — which also terminates TLS
+(D47). That proxy is the only thing that needs to listen publicly.
+
+### The forward when the data plane is bound to the LAN
+
+A tunnel to a phone whose **Public access → Bind** is `LAN` works: the forward
+lands on the LAN address the data plane is listening on (D111). What it does
+**not** survive is the phone changing network while the tunnel is up — the
+address it was told about no longer exists, so the tunnel stays `connected` and
+stops delivering. Reconnect after a network change; the row reports the state it
+measured, and nothing pretends otherwise.
+
 ## 8. Licensing
 
 `sshd-core` (Apache-2.0), `net.i2p.crypto:eddsa` (CC0-1.0) and SLF4J (MIT) are
@@ -269,7 +338,8 @@ notify: the first is the operator's own action, the next two are part of the
 first-use handshake the operator is looking at right now, and the last two are
 the result of a tap the operator just made.
 
-The message carries the stable code (`SSH_AUTH_FAILED`, `SSH_HOST_UNREACHABLE`,
-`SSH_TIMEOUT`, `HOST_KEY_MISMATCH`, `SSH_SESSION_CLOSED`) and never the host, the
+The message carries the stable code (`SSH_AUTH_FAILED`,
+`SSH_AUTH_METHOD_NOT_ALLOWED`, `SSH_HOST_UNREACHABLE`, `SSH_TIMEOUT`,
+`HOST_KEY_MISMATCH`, `SSH_SESSION_CLOSED`) and never the host, the
 port, the user name or the fingerprint — the audit `detail` contains the target
 id and the host, and it is precisely what must not leave the device.
