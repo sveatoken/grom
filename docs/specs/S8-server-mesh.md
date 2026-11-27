@@ -1,6 +1,7 @@
 # S8 — Server network (mesh)
 
-Status: implemented in v0.18.0 (D99–D103). This document is the contract between
+Status: implemented in v0.18.0 (D99–D103); the Bluetooth switch and the
+advertisement budget in v0.19.1 (D109). This document is the contract between
 two Grom servers, and between a Grom server and a phone that runs it.
 
 A mesh is **not** a protocol of its own. Every byte between two servers is the
@@ -26,6 +27,22 @@ auto-accept path.
 
 Discovery is opt-in (`MeshSettings.enabled`, default `false`) and only runs while
 the server is running. Three carriers publish sightings; one carries data only.
+
+### 2.0 What the operator's switches mean (S8-R016)
+
+Three switches and one fact, kept apart:
+
+| Name | Layer | Meaning |
+|---|---|---|
+| `enabled` | setting | the server network is on |
+| `advertise` / `scan` | setting | this phone speaks / listens |
+| `bluetooth` | setting | Grom uses the LE and Classic radios at all (default `true`) |
+| `bluetoothOn` | measurement | the *system* Bluetooth switch right now; `null` = no adapter or unreadable |
+
+`bluetooth: false` leaves the LAN and Wi-Fi Direct carriers untouched and stops
+the Bluetooth radios without reporting them as failures. `bluetoothOn: false`
+with `bluetooth: true` is a fact the operator must act on: S8 forbids the app
+from changing it, so the screen offers the system settings page.
 
 ### 2.1 LAN beacon (S8-R001)
 
@@ -289,3 +306,5 @@ no longer holds this device's key.
 | S8-R013 | every failure is a stable code and never contains an address or a key |
 | S8-R014 | a disabled or absent mesh answers truthfully and breaks nothing |
 | S8-R015 | a pairing carries peer-grantable scopes only; a local-client scope is refused on both sides, and a grant to an already paired device keeps its endpoint |
+| S8-R016 | Bluetooth use is a Grom setting (`MeshSettings.bluetooth`, default on); the system radio is never enabled, disabled or bonded by Grom, and its measured state is reported as `bluetoothOn` (`null` when unknown) beside a per-radio `platformOn` |
+| S8-R017 | the BLE advertisement fits the 31-byte legacy PDU with the service data field only (29 bytes); a radio that is available but refused to start is reported with its platform code, never as "ready" |

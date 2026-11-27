@@ -31,7 +31,7 @@ Task ids (`T-nn`) match §U of the master plan.
 | **5 — backup, CLI, advanced** | blocked by 4 | `backup/`, `cli/` |
 | **6 — production** | blocked by 5 | signing key, soak, review |
 
-Current version: `0.19.0` (versionCode 20). The thirteen gates in `tools/run-gates`
+Current version: `0.19.1` (versionCode 21). The thirteen gates in `tools/run-gates`
 are the baseline; every phase below adds tests, not gates that replace them.
 
 **The next concrete action** is T-01 (`apps/AppManifest.kt`), because every later
@@ -684,7 +684,8 @@ six-element argv, policy #65 keeps unproven engine switches out, and
 launcher's exact argv and waits for readiness, so this class of defect fails a
 gate instead of a phone.
 
-### Phase 1M — the server network — **done**
+### Phase 1M2 — the server network — **done**  
+*(the second increment that landed under the 1M label; 1M above is the AI gateway)*
 
 Several phones, each a complete Grom, that can find each other, see what the
 others serve and call one of those services — while every phone stays
@@ -768,3 +769,39 @@ server, verify with and without the data plane), `SshTargetStoreTest` **16**
 Not closed: no physical phone has dialled a real VPS; the `SSH_UNAVAILABLE` path
 for a build without Ed25519 is still untestable on a normal JVM; and four live
 tunnels are still four threads the phone pays for.
+
+### Phase 1O — a Bluetooth switch that belongs to Grom (D109) — **done**
+
+The mesh had Bluetooth but no way to say "not over Bluetooth": discovery started
+the LE advertiser, the LE scanner and the RFCOMM listener unconditionally, and an
+operator who wanted the LAN beacon alone had to turn discovery off as well.
+
+- **`MeshSettings.bluetooth`** (default `true`) decides whether *Grom* uses the
+  two Bluetooth carriers. Off leaves the LAN and Wi-Fi Direct untouched, reports
+  the Bluetooth rows as *"off — Bluetooth is not used for the server network"*
+  rather than as failures, and drops the Bluetooth sightings already in the
+  discovery book so a switched-off carrier cannot keep offering a pairing.
+- **The system radio stays the operator's.** Nothing in `mesh/` calls `enable()`,
+  `disable()`, `ACTION_REQUEST_ENABLE` or `createBond()`; when the radio is off
+  the screen measures that (`bluetoothOn`, `platformOn`) and offers Android's own
+  Bluetooth settings page. Android 13+ would refuse the alternative anyway.
+- **The BLE advertisement fits now.** v0.19.0 added the 128-bit UUID list *and*
+  the 128-bit service data: 47 bytes of the legacy 31, refused with
+  `ADVERTISE_FAILED_DATA_TOO_LARGE` while the row still said "ready". The data
+  field alone is 29 bytes and already names the UUID; the scan runs two filters
+  so a v0.19.0 phone is still seen, and `BleAdvertisement.legacyAdvertisementBytes()`
+  pins the arithmetic.
+- **A refusal is visible.** A recorded radio failure wins over `available`, keeps
+  the platform code (`BLE_ADVERTISE_FAILED:1`), and the pure model turns known
+  codes into sentences while printing an unknown one verbatim.
+
+No AIDL method was added: the switch travels through the existing
+`meshConfigureJson`, so the IPC contract stays at API 12.
+
+Gate: `tools/run-gates` **13/13**, policy **80/80** (#79–#80),
+`MeshSettingsTest` **8**, `MeshServiceTest` **8**, `DiscoveryBookTest` **6**,
+`BleAdvertisementTest` **5**, `MeshModelTest` **10**.
+
+Not closed: no phone has advertised or scanned under the new budget; the BLE
+adapter itself is Android-only and not JVM-tested (policy #66 keeps it thin), and
+a mixed-version mesh still relies on the service-data filter for the older side.

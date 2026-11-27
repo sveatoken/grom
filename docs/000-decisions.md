@@ -1883,3 +1883,56 @@ Three changes, at three levels:
 *Enforced by:* `tools/check-test-reports` (proved against a run with five of 92
 result files: verdict `FAILED`), `tools/run-gates`, `.github/workflows/ci.yml`,
 `tools/test-policy` #78.
+
+## D109 — one Bluetooth switch that belongs to Grom, and one that does not
+**ACCEPTED.** v0.19.0 had Bluetooth in the mesh but no way to say "not over
+Bluetooth". Turning discovery on started the BLE advertiser, the BLE scanner and
+the RFCOMM listener unconditionally, and an operator who wanted discovery over
+the LAN alone had to turn discovery off as well — which also stopped the LAN
+beacon. The screen listed the four radios but nothing let an operator choose.
+
+Two switches are involved and they are **not** the same thing, which is the whole
+of this decision:
+
+- **The system radio** belongs to the operator. Android 13+ (`targetSdk` 33+)
+  refuses `BluetoothAdapter.enable()`/`disable()` for a normal app, and Grom will
+  not ask for the platform dialog either: nothing in `mesh/` calls `enable()`,
+  `disable()`, `ACTION_REQUEST_ENABLE` or `createBond()`, and a policy check now
+  keeps it that way. When the radio is off, the screen says so and offers
+  Android's own Bluetooth settings page — as a fact to act on, not a button Grom
+  pretends to own.
+- **Grom's use of it** is `MeshSettings.bluetooth` (default `true`). Off means the
+  LE and Classic radios are never started, never scanned and never listed as
+  broken: the row says "off — Bluetooth is not used for the server network". The
+  switch is persisted with the rest of the mesh settings, applied through the
+  existing `meshConfigureJson` (no new AIDL method, no API bump), and turning it
+  off also drops the Bluetooth sightings already in the discovery book so a
+  switched-off carrier cannot keep offering a pairing that cannot be dialled.
+
+The default is `true` on purpose: discovery has always started these radios, and
+an upgrade that silently removed a carrier would break the one thing this
+project keeps insisting on — that a change is stated, not hidden.
+
+While implementing it, two defects in the same area were found and fixed rather
+than documented around:
+
+1. **The BLE advertisement did not fit.** The adapters added both the 128-bit
+   service UUID list (18 bytes) and the 128-bit service data (26 bytes) on top of
+   the 3 flag bytes, for 47 of the legacy 31. The stack answers that with
+   `ADVERTISE_FAILED_DATA_TOO_LARGE`, and the screen — which only looked at
+   `available` — still printed "ready" while nothing was ever transmitted. The
+   advertisement now carries the service data only (29 bytes, the data field
+   already names the UUID), the scan runs two filters so an older Grom that still
+   advertises the list stays visible, and `BleAdvertisement.legacyAdvertisementBytes()`
+   makes the arithmetic testable.
+2. **A refusal was invisible.** `lastError` was hidden behind `available`, so
+   "the adapter refused to start" could not be seen. A recorded failure now wins
+   over the capability, keeps the platform's numeric code (`BLE_ADVERTISE_FAILED:1`),
+   and is turned into a sentence by the pure model — an unknown code is printed
+   verbatim instead of swallowed.
+
+*Enforced by:* `MeshSettingsTest` (default, partial apply, an older file),
+`MeshServiceTest` (radios left out, turned back on, measured platform switch,
+sightings dropped), `DiscoveryBookTest` (`retain`), `BleAdvertisementTest` (the
+31-byte budget), `MeshModelTest` (two facts stay distinct, codes become
+sentences), `tools/test-policy` #79, #80.

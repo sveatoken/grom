@@ -42,7 +42,7 @@ plane (`127.0.0.1:47001`); the mesh only speaks the public data plane.
 | **LAN / VPN** | discovery and data | yes, `http(s)` | A signed UDP beacon every 30 s while advertising is on. Preferred: ordinary TCP. |
 | **Wi-Fi Direct** | discovery and data | yes, `http(s)` | DNS-SD service record (`_grom._tcp`) carries the node prefix and the data-plane port; the group owner's IP is used once the group forms. |
 | **Bluetooth Classic** | data | yes, `bt://<MAC>` | Secure RFCOMM to a **bonded** device; HTTP/1.1 is carried over the byte stream. No discovery: Android already knows bonded devices, and Grom will not scan Bluetooth in the background. |
-| **Bluetooth LE** | discovery only | **no** | An 8-byte advertisement: version, data-plane flag, node-id prefix, port. Deliberately too small for a request. |
+| **Bluetooth LE** | discovery only | **no** | An 8-byte advertisement: version, data-plane flag, node-id prefix, port — carried in the service **data** field only, because the legacy PDU is 31 bytes and the 128-bit UUID list cannot fit beside it (29 used). Deliberately too small for a request. |
 
 The policy is explicit ([`MeshTransport`](../engine/src/main/java/app/grom/server/mesh/MeshModels.kt)):
 BLE is never used to move data. A BLE-only sighting has no address and the screen
@@ -73,6 +73,28 @@ both unticked is exactly the old `Devices` pairing.
 A pairing never carries `mesh.read` or `mesh.call`: those are grants for an
 application on *this* phone, not for another device, and the engine refuses them
 at the pairing boundary (S8-R015).
+
+### 3.1 The Bluetooth switch (D109)
+
+The section has **one** Bluetooth switch, and it is Grom's, not the phone's.
+
+| | What it does | Who owns it |
+|---|---|---|
+| **Bluetooth** (in the section) | decides whether Grom starts the LE advertiser/scanner and the Classic listener | Grom; saved as `MeshSettings.bluetooth`, on by default |
+| **System Bluetooth** (quick settings) | the radio itself | the operator; Android 13+ will not let an app call `enable()`/`disable()`, and Grom never asks |
+
+- Turning the Grom switch **off** leaves discovery on: the LAN beacon and Wi-Fi
+  Direct keep working, and the two Bluetooth rows read *"off — Bluetooth is not
+  used for the server network"*. Sightings already heard over Bluetooth are
+  dropped, so the nearby list cannot offer a pairing that can no longer be
+  dialled.
+- Turning it **on** asks for the Bluetooth runtime permissions if they are
+  missing (the same dialog discovery uses). It does **not** switch the radio on:
+  if the system Bluetooth is off, the section says so and shows **Open Bluetooth
+  settings**, which opens Android's own page. There is no request to flip it.
+- The system radio state is **measured** every time the section opens or is
+  refreshed (`bluetoothOn`), never remembered, and it is `null` on a phone with
+  no adapter — "unknown" rather than a guessed `false`.
 
 ## 4. Using a service on another server
 
@@ -165,6 +187,26 @@ different decisions.
 | `MESH_BAD_RESPONSE` | caller | the peer answered non-JSON or an unusable document |
 | `SERVICE_NOT_SHARED` | peer | the operator's share list does not open this service |
 
+### 8.1a Radio codes
+
+These are the per-radio row codes. They are not mesh failures: a radio row is a
+measurement of *this phone*, and the screen turns each one into a sentence (an
+unknown code is printed verbatim rather than hidden).
+
+| Code | Meaning | What the operator can do |
+|---|---|---|
+| `BLUETOOTH_DISABLED` | the system Bluetooth radio is off | turn Bluetooth on in the system, or leave Grom's switch off |
+| `BLUETOOTH_UNAVAILABLE` | the phone has no Bluetooth adapter | nothing — the other carriers still work |
+| `BLE_ADVERTISE_FAILED:<n>` | the stack refused the advertisement (`<n>` is Android's `AdvertiseCallback` code, `1` = too large, `3` = already advertising) | stop the other advertiser, or rely on LAN |
+| `BLE_ADVERTISE_UNAVAILABLE` | this phone's LE cannot advertise | nothing |
+| `BLE_SCAN_FAILED:<n>` | the stack refused the scan | scan again; if it persists the row keeps the code |
+| `BLE_NO_IDENTITY` | the device identity is not ready yet | open **Devices** once, then scan |
+| `BLUETOOTH_LISTEN_FAILED` | the RFCOMM listener could not be created | pair the device in the system first |
+| `BLUETOOTH_ACCEPT_FAILED` | the accepted link died | turn discovery off and on |
+| `WIFI_DIRECT_DISABLED` | Wi-Fi is off, so Wi-Fi Direct cannot run | turn Wi-Fi on |
+| `WIFI_DIRECT_UNAVAILABLE` | no Wi-Fi Direct hardware | nothing |
+| `WIFI_DIRECT_DISCOVERY_FAILED` | the platform refused peer discovery | scan again |
+
 An identity that changed under a pairing is not a mesh code: the connect document
 is unsigned, so the mesh cannot prove it. The paired-device probe reports it as
 `PEER_IDENTITY_CHANGED` in `Devices` (S1-R043), and the roster then measures the
@@ -200,6 +242,14 @@ uses the connection when a call is made and reports `unreachable` when it is gon
   measurement, not a bug.
 - **Bluetooth Classic** needs a bonded device and is slow (tens of KB/s). It is a
   fallback for pairing and small JSON calls, not for streaming.
+- **The Bluetooth radio is the operator's switch.** From Android 13 an app may
+  not enable or disable it, so Grom only reports the state and opens the system
+  page; the Grom switch decides whether Grom uses the radio at all (D109).
+- **The BLE advertisement is 29 of the 31 legacy bytes.** Adding the service
+  UUID list beside the service data would be 47 and the stack would refuse it, so
+  the data field carries the name and a scan filter matches it. A v0.19.0 phone
+  still sees a v0.19.1 one through the service-data filter; the reverse needs the
+  older phone to update.
 - **Wi-Fi Direct** gives a group owner IP but no service payload beyond DNS-SD;
   multiple Grom servers in one group need a real discovery protocol, which this
   increment does not add. Prefer the LAN when both phones share a network.

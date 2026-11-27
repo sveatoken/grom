@@ -490,6 +490,19 @@ check "a pasted line break in a password is refused, not stored" \
 check "the test gate proves every test class ran, not just that gradle said ok" \
   bash -c "grep -q 'check-test-reports' tools/run-gates && grep -q 'rm -rf engine/build/test-results' tools/run-gates && grep -q '@Test' tools/check-test-reports && grep -q 'ran\" -lt \"\$expected\"' tools/check-test-reports && grep -q 'gromTestReportsDir' tools/test-agent && grep -q 'gromTestReportsDir' engine/build.gradle.kts"
 
+# 79. Grom has one Bluetooth switch and the phone has another (D109). The mesh
+#     must never flip the system radio: Android 13+ refuses enable()/disable()
+#     for apps, and asking for the platform dialog would still be the app
+#     deciding. The Grom switch is a setting, and the system state is measured.
+check "the mesh never switches the system bluetooth radio" \
+  bash -c "! grep -rnE '\.enable\(\)|\.disable\(\)|ACTION_REQUEST_ENABLE|createBond' $MAIN/mesh --include='*.kt' | grep -vE ':[0-9]+: *(\*|//)' && grep -q 'val bluetooth: Boolean = true' $MAIN/mesh/MeshSettings.kt && grep -q 'fun platformEnabled' $MAIN/mesh/MeshRadio.kt && grep -q 'bluetoothOn' $MAIN/mesh/MeshService.kt"
+
+# 80. The BLE advertisement fits the legacy PDU and a refusal reaches the screen
+#     (D109). v0.19.0 added the UUID list AND the service data: 47 of 31 bytes,
+#     ADVERTISE_FAILED_DATA_TOO_LARGE, and a row that still said "ready".
+check "the ble advertisement fits a legacy pdu and a refusal is shown" \
+  bash -c "! grep -q 'addServiceUuid' $MAIN/mesh/android/AndroidMeshRadios.kt && grep -q 'LEGACY_AD_MAX_BYTES' $MAIN/mesh/BleAdvertisement.kt && grep -q 'legacyAdvertisementBytes' $MAIN/mesh/BleAdvertisement.kt && grep -q 'BLE_ADVERTISE_FAILED:' $MAIN/mesh/android/AndroidMeshRadios.kt && grep -q 'radio.error != null' app/src/main/java/app/grom/server/GromActivity.kt && grep -q 'fun radioErrorRes' app/src/main/java/app/grom/server/ui/MeshModel.kt"
+
 echo
 TOTAL=$((PASS + FAIL))
 if [ "$FAIL" -ne 0 ]; then

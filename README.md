@@ -278,7 +278,10 @@ roster and a relay:
 1. **Public access** → enable, bind **LAN** (or a VPN interface), auth **Key** or
    **Both**.
 2. **Server network** → **Turn discovery on** (the screen asks for the nearby
-   devices permissions it needs).
+   devices permissions it needs). The section has its own **Bluetooth** switch:
+   turning it off keeps discovery on over the LAN and Wi-Fi Direct. It does not
+   touch the system radio — Android 13+ will not let an app do that, so when the
+   phone's Bluetooth is off the screen says so and opens the system settings.
 3. Tap a nearby phone → **Pair**, compare the fingerprint on both screens, and
    enter the code the other phone shows.
 
