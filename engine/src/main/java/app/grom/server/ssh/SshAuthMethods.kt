@@ -83,7 +83,7 @@ internal class SshAuthMethods : ClientUserAuthServiceFactory() {
         fun sanitize(offered: List<String>?): List<String> {
             if (offered == null) return emptyList()
             return offered
-                .mapNotNull { raw -> raw?.trim()?.lowercase()?.takeIf { NAME.matches(it) } }
+                .mapNotNull { raw -> raw.trim().lowercase().takeIf { NAME.matches(it) } }
                 .distinct()
                 .sorted()
                 .take(MAX_METHODS)
