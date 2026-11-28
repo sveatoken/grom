@@ -20,11 +20,24 @@ honesty rules — is `docs/TWO-IN-ONE.md`.
 
 ## 1. Add the module
 
+Vendor three directories from this repository — `engine/`, `sdk/` and `agent/` —
+**side by side**. The engine packages `../agent/grom-agent.js`, a path relative to
+the module, so the layout is the same wherever the module is vendored (D112).
+
 `settings.gradle.kts` of the host project:
 
 ```kotlin
 include(":sdk")
 include(":engine")
+```
+
+or, for a host that keeps third-party code under a directory:
+
+```kotlin
+include(":sdk")
+project(":sdk").projectDir = file("third_party/grom/sdk")
+include(":engine")
+project(":engine").projectDir = file("third_party/grom/engine")
 ```
 
 `app/build.gradle.kts`:
@@ -33,12 +46,39 @@ include(":engine")
 dependencies {
     implementation(project(":engine"))
 }
+
+android {
+    packaging {
+        resources {
+            // The host packages, so the host picks: sshd-core and sshd-common
+            // both carry these files and a library cannot choose for you.
+            pickFirsts += setOf(
+                "META-INF/DEPENDENCIES",
+                "META-INF/LICENSE*",
+                "META-INF/NOTICE*",
+                "META-INF/INDEX.LIST"
+            )
+        }
+    }
+}
 ```
+
+Both settings are verified by `tools/check-embed`, which builds a host APK from a
+temporary root that is not Grom's; `examples/embedded` is the compiled caller.
+The full shipping guide, including the exact error each setting prevents, is
+`docs/TWO-IN-ONE.md` §3.1.
 
 The engine's manifest is merged automatically. It declares:
 
 * `INTERNET`, `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_SPECIAL_USE`,
   `POST_NOTIFICATIONS`;
+* `ACCESS_NETWORK_STATE` and `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` (the Doctor);
+* the server-network permissions — Bluetooth (scan/advertise/connect, plus the
+  maxSdk 30 pair), `NEARBY_WIFI_DEVICES`, `ACCESS_WIFI_STATE`,
+  `CHANGE_WIFI_STATE` and `ACCESS_COARSE/FINE_LOCATION` (maxSdk 32). They are all
+  runtime permissions, so the manifest line grants nothing; the mesh asks only
+  when the operator turns discovery on. The full table is in
+  `docs/TWO-IN-ONE.md` §3.1;
 * `GromService` with `android:exported="false"` and **no** IPC permission.
 
 That default is deliberate. An embedded server is private to the host. If a host
@@ -309,7 +349,8 @@ namespace as a security boundary between co-installed apps.
 ## 5. Distributing the library
 
 The engine and the SDK are published as source modules in this repository
-(`include(":engine")`, `include(":sdk")`). There is no AAR on a registry yet:
+(`include(":engine")`, `include(":sdk")`, plus the `agent/` directory they expect
+beside them). There is no AAR on a registry yet:
 until the API stops moving, a versioned AAR would be a second artifact to keep
 in sync, and `include` gives the host the same code the tests build. A host
 that wants a single artifact can run `./gradlew :engine:assembleRelease` and

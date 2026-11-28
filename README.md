@@ -164,15 +164,16 @@ gradle :app:assembleServer29Release :app:assemblePeripheral26Release
 ## Conformance
 
 ```bash
-tools/run-gates                           # all 13 gates, in order
+tools/run-gates                           # all 14 gates, in order
 gradle :engine:testDebugUnitTest          # engine: supervisor, HTTP, data plane, SSH
 gradle :app:testServer29DebugUnitTest     # app: dashboard projection, update check
 gradle :app:lint                          # lint, 0 errors required
 tools/check-third-party                   # dependency ledger matches the build
-tools/test-policy                         # 42 static invariants
+tools/test-policy                         # 85 static invariants
 tools/test-agent                          # secrets go over stdin, not argv/env
 tools/test-agent-runtime                  # grom-agent.js protocol + degradation
 tools/check-site                          # download page: static, no third parties
+tools/check-embed                         # a host app built from another root (D112)
 tools/verify-ipc-signing                  # C-008, needs the three APKs
 tools/test-fleet                          # tools/grom-fleet protocol tests
 tools/test-hub                            # tools/grom-hub protocol tests

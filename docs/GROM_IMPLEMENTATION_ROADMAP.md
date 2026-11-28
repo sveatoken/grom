@@ -22,9 +22,11 @@ Task ids (`T-nn`) match §U of the master plan.
 | **1J — "2 in 1": host-chosen control port, host-configured data plane, a lean peripheral** | **done** | `core/ControlPort` + `GromEmbed.Options.controlPort` (D85), `superSaveConfig` API 9 + `SuperServerConfigInput` (D86), peripheral `jniLibs` exclusion (D87), `docs/TWO-IN-ONE.md`; `tools/check-flavours` |
 | **1K — "2 in 1" without complications: versioned consent, an automatic port, host-readable health** | **done** | `EmbedConsent` (D88), `ControlPort.resolve` + `GromEmbed.AUTO_PORT` (D89), `EmbedHealth` projection + `GromEmbed.health` (D90), `GromClient.bind(createIfMissing=false)` and a released registration after `onNullBinding`; `docs/TWO-IN-ONE.md` §2, §9 |
 | **1L — universal client connect: discovery, scoped services, a thin SDK** | **done** | `GET /grom/v1/connect` (D91), `services.read`/`services.call` + `Plugin.scopedOps` (D92), `app.grom.sdk.connect` HTTP client + compiled `examples/connect` (D93); `docs/specs/S6-client-connect.md` |
-| **1M — server network: discovery, a roster and scoped server-to-server calls** | **done** | `GET /v1/mesh` + `POST /v1/mesh/call` (D99, D100), per-peer service shares (D101), LAN beacon + BLE advert + Wi-Fi Direct DNS-SD + secure RFCOMM `bt://` (D102), untrusted bounded discovery (D103); `docs/MESH.md`, `docs/specs/S8-server-mesh.md`; API **11** |
+| **1M — AI gateway: three protocols, sealed keys, a catalogue that limits spending** | **done** | `AiGateway` + `/v1/ai/*` (D94), sealed keys and endpoint policy (D95), measured not polled (D96), streaming over `SuperResponse.Stream` (D97); API **10**; `docs/AI.md`, `docs/specs/S7-ai-gateway.md` |
+| **1M2 — server network: discovery, a roster and scoped server-to-server calls** | **done** | `GET /v1/mesh` + `POST /v1/mesh/call` (D99, D100), per-peer service shares (D101), LAN beacon + BLE advert + Wi-Fi Direct DNS-SD + secure RFCOMM `bt://` (D102), untrusted bounded discovery (D103); `docs/MESH.md`, `docs/specs/S8-server-mesh.md`; API **11** |
 | **1N — an SSH/VPS you can actually diagnose, and more than one** | **done** | stage-based failure codes and keyboard-interactive passwords (D105), `sshVerify` without the data plane (D106), one current server and four live tunnels (D107); API **12**; `docs/SSH-BRIDGE.md` |
-| **1O — the tunnel carries only what is bound, and says what the server accepts** | **done** | the forward reaches the endpoint the data plane is bound to, LAN included (D111), and an auth failure names the methods the server offered (D110); `docs/SSH-BRIDGE.md` §7a |
+| **1P — the tunnel carries only what is bound, and says what the server accepts** | **done** | the forward reaches the endpoint the data plane is bound to, LAN included (D111), and an auth failure names the methods the server offered (D110); `docs/SSH-BRIDGE.md` §7a |
+| **1Q — the embedding guide is executed, and builds in someone else's root** | **done** | the agent path is module-relative, the host-side `pickFirsts` contract is documented, `examples/embedded` is a compiled caller, and `tools/check-embed` builds a host APK from an unrelated root; D112 |
 | **1B — core hardening** | **next** | `apps/AppManifest.kt`, `apps/PortAllocator.kt`, `apps/HealthGate.kt`, `apps/ReleaseStore.kt`, `proc/ChildProcess.kt`, `adapters/`, `auth/Scope.kt` — none exist yet |
 | **2 — Application Manager MVP** | **blocked by 1B** | `apps/ApplicationManager.kt`, `apps/AppSupervisor.kt`, the gateway, `/v1/apps` |
 | **3 — runtimes and adapters** | blocked by 2 | `apps/runtime/`, `adapters/`, LND |
@@ -32,7 +34,7 @@ Task ids (`T-nn`) match §U of the master plan.
 | **5 — backup, CLI, advanced** | blocked by 4 | `backup/`, `cli/` |
 | **6 — production** | blocked by 5 | signing key, soak, review |
 
-Current version: `0.20.0` (versionCode 22). The thirteen gates in `tools/run-gates`
+Current version: `0.21.0` (versionCode 23). The fourteen gates in `tools/run-gates`
 are the baseline; every phase below adds tests, not gates that replace them.
 
 **The next concrete action** is T-01 (`apps/AppManifest.kt`), because every later
@@ -608,8 +610,8 @@ of which `EmbedHealthTest` **18**, `EmbedConsentTest` **7**, `EmbedSettingsTest`
 0/0.
 
 Not closed: the companion model (model B in `docs/TWO-IN-ONE.md`) is still out of
-scope — it needs a second trust relation, not code; and no host APK is built
-against the engine in CI.
+scope — it needs a second trust relation, not code. (A host APK *is* built from
+an unrelated root since D112: `tools/check-embed`.)
 
 ### Phase 1L — universal client connect — **done**
 
@@ -806,3 +808,74 @@ Gate: `tools/run-gates` **13/13**, policy **80/80** (#79–#80),
 Not closed: no phone has advertised or scanned under the new budget; the BLE
 adapter itself is Android-only and not JVM-tested (policy #66 keeps it thin), and
 a mixed-version mesh still relies on the service-data filter for the older side.
+
+### Phase 1P — the tunnel carries only what is bound, and says what the server accepts — **done**
+
+Two defects from use, both of the "looks connected" kind:
+
+- **A green tunnel that carried nothing** (D111). The forwarding filter accepted a
+  `forwarded-tcpip` channel only when its destination was loopback on the
+  data-plane port. That was written when the data plane could only be loopback;
+  `LAN` binds the phone's own address, and MINA asks the filter with exactly the
+  endpoint we registered — so every connection was refused while the state said
+  `CONNECTED`. The filter now allows the single endpoint from our own request, and
+  nothing else.
+- **"Wrong password" and "this server does not take passwords" were the same
+  sentence** (D110). The server names the methods it accepts in
+  `SSH_MSG_USERAUTH_FAILURE`; the driver kept that list in a `protected` field and
+  only logged it. `SshAuthMethods` now records the offered list per connection
+  (filtered, at most six, empty = not measured), and a requested method that is
+  not offered returns `SSH_AUTH_METHOD_NOT_ALLOWED`. With
+  `PermitRootLogin prohibit-password` — the default on a Hetzner or Debian cloud
+  image — that is the difference between a password problem and a policy.
+
+Gate: `tools/run-gates` **13/13**, policy **82/82** (#81, #82),
+`SshForwardingPolicyTest` **6**, `SshAuthMethodsTest` **9**,
+`SshTunnelManagerTest` (a LAN-bound data plane carrying real bytes).
+
+Not closed: a phone that changes network while the tunnel is up keeps a forward
+registered to the old address and must reconnect; and the list cannot separate a
+wrong password from a PAM policy that refuses the user — with
+`keyboard-interactive` offered, the answer stays `SSH_AUTH_FAILED` (D110).
+
+### Phase 1Q — the embedding guide is executed, and builds in someone else's root — **done**
+
+The "2 in 1" guide had never been run by anything. A host project that followed it
+verbatim failed twice:
+
+- **The agent script was resolved from `rootProject`** — correct only while Grom
+  *is* the root project. A host that vendored `engine/`, `sdk/` and `agent/` under
+  `third_party/grom/` got *"File '<host>/agent/grom-agent.js' specified for
+  property 'sourceFile' does not exist"* while the file sat beside the engine
+  module. The path is now `layout.projectDirectory.file("../agent/grom-agent.js")`,
+  which is the same value inside this repository and correct everywhere else
+  (D112).
+- **The duplicate `META-INF` files were left to the consumer.** `sshd-core` and
+  `sshd-common` both ship `DEPENDENCIES`, `LICENSE` and `NOTICE`, and they are
+  merged by the module that *packages*. A `packaging` block in `:engine` is
+  ignored for the host — verified against AGP 8.11 by adding it and watching the
+  same failure — so the pickFirsts live in the host build file, documented with
+  the exact error they prevent, and pinned by policy #85 against a library-side
+  "fix" that would silently do nothing.
+- **Nothing had a caller.** `GromEmbed` was used by its own tests and by no
+  module, the reference app talks to the service directly, and the C-008 test
+  apps depend only on `:sdk` — so a wrong guide was invisible. `examples/embedded`
+  is now a compiled module that calls the documented API, and its tests pin the
+  sentences and the consent rule.
+- **`tools/check-embed` is the gate**: an isolated root with no `agent/` at its
+  top level, the three directories vendored under `third_party/grom/`, and a host
+  APK built from the documented build file. It asserts the APK, the packaged agent
+  asset, the private service and the absence of an IPC permission.
+
+The guide also gained the measured numbers: the engine and its dependencies add
+**~5.6 MB** to a host APK without the runtime (not the "~2–3 MB" it claimed), and
+the merged manifest is listed in full — the mesh brings Bluetooth and Wi-Fi Direct
+entries that the old text said did not exist.
+
+Gate: `tools/run-gates` **14/14** (new `check-embed`), policy **85/85** (#83–#85),
+`examples/embedded` **18** tests, lint 0/0.
+
+Not closed: the example is a library, so no host *application* runs on a device in
+this repository; a real host that already has its own `packaging` block must merge
+the patterns rather than replace them; and the engine is still one module, so a
+host cannot opt out of the mesh permissions it does not use.

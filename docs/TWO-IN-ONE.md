@@ -196,7 +196,30 @@ what the code means instead of crashing.
 
 ## 3. Build it
 
-### 3.1 Modules
+Everything in this section is compiled and built by this repository, not just
+described: `examples/embedded` is a host module that uses the flow below, and
+`tools/check-embed` builds a host APK from a temporary root that is **not**
+Grom's (D112). If a step stops working, a gate fails here instead of in your
+project.
+
+### 3.1 Modules — three directories, side by side (D112)
+
+A host vendors **three** directories from this repository: `engine/`, `sdk/` and
+`agent/`. They must sit next to each other, because the engine packages the agent
+script from `../agent/grom-agent.js` — a path relative to the *module*, so it is
+correct wherever the module lives. Nothing else of Grom is needed (no `app/`, no
+`tools/`, no `scripts/`).
+
+The simplest layout puts them at the host's root:
+
+```text
+host/
+  settings.gradle.kts
+  engine/     ← vendored
+  sdk/        ← vendored
+  agent/      ← vendored (grom-agent.js)
+  app/        ← your application
+```
 
 ```kotlin
 // settings.gradle.kts
@@ -211,16 +234,87 @@ dependencies {
 }
 ```
 
-The engine manifest merges automatically: `INTERNET`, `FOREGROUND_SERVICE`,
-`FOREGROUND_SERVICE_SPECIAL_USE`, `POST_NOTIFICATIONS`, the two diagnostics
-permissions (`ACCESS_NETWORK_STATE`, `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`) and a
-**private** (`exported="false"`) `GromService`. You do not add an IPC permission —
-caller and service are the same UID — and you do not copy permission lines by
-hand.
+A host that prefers to keep third-party code apart can vendor under a directory
+and point at it — same result, and the layout the gate builds:
+
+```kotlin
+// settings.gradle.kts
+include(":sdk")
+project(":sdk").projectDir = file("third_party/grom/sdk")
+include(":engine")
+project(":engine").projectDir = file("third_party/grom/engine")
+```
+
+```text
+host/
+  third_party/grom/{engine,sdk,agent}/
+  app/
+```
+
+**Two build settings the host owns.** Neither can live in a library, and both are
+verified by `tools/check-embed`, which builds this exact project from an unrelated
+root:
+
+```kotlin
+// app/build.gradle.kts
+android {
+    packaging {
+        resources {
+            // sshd-core and sshd-common both ship these files, and they are
+            // merged by the module that packages — this one. A packaging block
+            // in :engine does not reach you (verified against AGP 8.11).
+            pickFirsts += setOf(
+                "META-INF/DEPENDENCIES",
+                "META-INF/LICENSE*",
+                "META-INF/NOTICE*",
+                "META-INF/INDEX.LIST"
+            )
+        }
+    }
+}
+```
+
+Without it the build ends with:
+
+```text
+Execution failed for task ':app:mergeDebugJavaResource'.
+> 2 files found with path 'META-INF/DEPENDENCIES' from inputs:
+   - org.apache.sshd:sshd-core:2.13.1/sshd-core-2.13.1.jar
+   - org.apache.sshd:sshd-common:2.13.1/sshd-common-2.13.1.jar
+```
+
+The other host-side setting is `jniLibs.useLegacyPackaging = true` (§3.2). If the
+engine build fails with `File '<host>/agent/grom-agent.js' ... does not exist`,
+the `agent/` directory is missing or not beside `engine/`.
+
+A small machine may also need more heap than Gradle's 512 MB default for the
+daemon that compiles this: `org.gradle.jvmargs=-Xmx1024m
+-XX:MaxMetaspaceSize=512m` (the engine's own profile is in `gradle.properties`).
+A metaspace failure looks like a Kotlin `InvocationTargetException`, not like an
+embedding error.
+
+The engine manifest merges automatically. It declares, in full (D82):
+
+| Group | Permissions |
+|---|---|
+| Service | `INTERNET`, `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_SPECIAL_USE`, `POST_NOTIFICATIONS` |
+| Diagnostics | `ACCESS_NETWORK_STATE`, `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` |
+| Server network (mesh) | `BLUETOOTH_SCAN` (`neverForLocation`), `BLUETOOTH_ADVERTISE`, `BLUETOOTH_CONNECT`, `NEARBY_WIFI_DEVICES` (`neverForLocation`), `ACCESS_WIFI_STATE`, `CHANGE_WIFI_STATE`, plus `BLUETOOTH`/`BLUETOOTH_ADMIN` (maxSdk 30) and `ACCESS_COARSE/FINE_LOCATION` (maxSdk 32) for older devices |
+| Optional hardware | `android.hardware.bluetooth_le`, `android.hardware.wifi.direct` — both `required="false"` |
+
+and one **private** (`exported="false"`) `GromService`. You do not add an IPC
+permission — caller and service are the same UID — and you do not copy permission
+lines by hand.
+
+The Bluetooth and Wi-Fi Direct entries arrive with the server network even in a
+host that never calls it. They are all *runtime* permissions, so the manifest
+line grants nothing; the mesh asks when the operator turns discovery on. The
+module is one unit today, so a host that wants a smaller budget needs the
+optional `core`/`mesh` split, which is not built.
 
 If your app already declares permissions, check the merged manifest
 (`app/build/intermediates/merged_manifests/<variant>/AndroidManifest.xml`). The
-engine adds no storage, location or package-query permission; a host that adds
+engine adds no storage, package-query or overlay permission; a host that adds
 `QUERY_ALL_PACKAGES` or `PACKAGE_USAGE_STATS` is making its own decision, not
 inheriting one from Grom (D82).
 
@@ -394,7 +488,7 @@ rather than re-prompting on every launch.
 | Identity | The embedded server has its **own** `nodeId`, derived from a seed sealed by the **host's** Keystore entry. It is not the standalone app's identity. |
 | Updates | The engine and the runtime ship with the host, so they update when the host updates. There is no separate Grom channel. |
 | Uninstall | Uninstalling the host removes the embedded server and its data. The standalone Grom, if installed, is unaffected. |
-| Size | +~38 MB APK with the runtime, ~2–3 MB without it; the host's own code dominates otherwise. |
+| Size | +~38 MB APK with the runtime. Without it the engine, its dependencies and the agent script add **~5.6 MB** to a host APK (measured on the debug host that `tools/check-embed` builds; debug builds are not shrunk, so a release host is at or below that). |
 | Permissions | The merged manifest is the union. Check it once; a permission your host adds is a capability the server process also holds. |
 | Background | The same Doze/vendor-kill constraints as the standalone app. The host must expose the exemption and the boot opt-in. |
 
@@ -457,9 +551,12 @@ with its own scopes. Both can be paired into the same roster.
 
 ## 8. Checklist
 
-- [ ] `include(":engine")` (and `:sdk`) and `implementation(project(":engine"))`.
+- [ ] `engine/`, `sdk/` and `agent/` vendored **side by side**, `include(":engine")`
+      and `include(":sdk")`, `implementation(project(":engine"))`.
+- [ ] `packaging.resources.pickFirsts` for `META-INF/DEPENDENCIES`,
+      `LICENSE*`, `NOTICE*`, `INDEX.LIST` — the host packages, so the host picks.
 - [ ] `jniLibs` populated **or** a deliberate decision to run without the agent.
-- [ ] `jniLibs.useLegacyPackaging = true` in the host app.
+- [ ] `jniLibs.useLegacyPackaging = true` in the host app (only if you ship it).
 - [ ] `controlPort = GromEmbed.AUTO_PORT` (or an explicit `47101`, not `47001`).
 - [ ] Consent screen → `recordConsent(context, noticeVersion)` → `start` from an
       Activity, with `Options.noticeVersion` set to the same version.
@@ -547,3 +644,6 @@ the screen.
 | a health check never starts the server | `GromClient.bind(createIfMissing = false)`, `GromEmbedStartCodeTest` |
 | advice opens the right system page | `EmbedSettingsTest` |
 | a dead registration is released | `GromClient.unbind()` after `onNullBinding`/`onBindingDied` (S4-R018) |
+| the guide's build file really builds, from a root that is not Grom's | `tools/check-embed` (a temp root, the three directories under `third_party/grom/`, a host APK with the agent asset and a private service), `tools/test-policy` #83 |
+| a host has a compiled caller, not just a document | `examples/embedded` (built and tested in `tools/run-gates` and CI), `tools/test-policy` #84 |
+| the engine does not pretend to fix its consumer's packaging | `tools/test-policy` #85 (a `packaging` block in `:engine` would be ignored, so the contract lives in the host) |

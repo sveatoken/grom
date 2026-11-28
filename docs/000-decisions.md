@@ -2016,3 +2016,65 @@ reached.
 *Enforced by:* `SshForwardingPolicyTest` (loopback, a LAN destination, a foreign
 host, a foreign port, a null endpoint), `SshTunnelManagerTest` (bytes really flow
 through a tunnel whose data plane is bound to the LAN address).
+
+## D112 — the embedding guide is a build, and the engine resolves the agent beside itself
+
+`GromEmbed` was the documented way to ship "2 in 1", and nothing had ever built a
+host from that documentation. A host project that followed it verbatim failed
+twice before it produced an APK:
+
+```
+A problem was found with the configuration of task ':engine:syncAgentRuntime'
+  - property 'sourceFile' specifies file '<host>/agent/grom-agent.js'
+    which doesn't exist
+```
+
+`engine/build.gradle.kts` read the agent script from `rootProject`. That is Grom's
+root only while Grom *is* the root project; in a host it is the host's root, and
+the script is not there — it sits beside the engine module, wherever that module
+lives. The path is now `layout.projectDirectory.file("../agent/grom-agent.js")`,
+the same value inside this repository and correct in every other root.
+
+The second failure came later, when the APK was packaged:
+
+```
+Execution failed for task ':app:mergeDebugJavaResource'.
+> 2 files found with path 'META-INF/DEPENDENCIES' from inputs:
+   - org.apache.sshd:sshd-core:2.13.1/sshd-core-2.13.1.jar
+   - org.apache.sshd:sshd-common:2.13.1/sshd-common-2.13.1.jar
+```
+
+Those files are merged by the module that packages, so the engine cannot pick
+them for its consumer. A `packaging { resources { pickFirsts ... } }` block was
+added to `:engine` and the same failure came back unchanged — measured, not
+assumed — which means a library-side "fix" would have been a silent lie. The
+pickFirsts therefore live in the host build file and in the guide, next to
+`jniLibs.useLegacyPackaging`, which is host-side for the same structural reason.
+Policy #85 keeps a `packaging` block out of the engine, so nobody can remove the
+host contract believing it is redundant.
+
+Why neither was noticed: `:app` builds from Grom's own root (where `rootProject`
+is correct), the C-008 test apps depend only on `:sdk`, and `GromEmbed` had **no
+caller outside its own tests** — the reference application talks to `GromService`
+directly. A guide with no build cannot be wrong in a way a gate sees.
+
+Three things changed so that it can be:
+
+1. **`examples/embedded`** — a compiled module that depends on `:engine` the way a
+   host does, calls the documented API, and pins the sentences and the consent
+   rule in JVM tests. It is built and tested by `tools/run-gates` and CI.
+2. **`tools/check-embed`** — the gate. It copies `engine/`, `sdk/` and `agent/`
+   into a temporary root, deliberately leaves **no** `agent/` at that root's top
+   level (the layout the old line could not survive), writes the host from the
+   guide, and builds its APK. It asserts the agent asset is packaged, the service
+   stays `exported="false"`, and the host needed no IPC permission.
+3. **The guide measures.** The engine and its dependencies add **~5.6 MB** to a
+   host APK without the runtime, not the "~2–3 MB" it claimed; the merged manifest
+   is listed in full, because the mesh has brought Bluetooth and Wi-Fi Direct
+   entries since the paragraph that said the engine adds no such permission was
+   written.
+
+*Enforced by:* `tools/check-embed` (isolated root, host APK), `examples/embedded`
+(built and tested in `tools/run-gates` and CI), `tools/test-policy` #83 (the
+module-relative path and the gate's existence), #84 (the example is wired into
+the gate, the test-report check and CI), #85 (no library-side packaging block).
