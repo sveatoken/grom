@@ -83,6 +83,12 @@ android {
 /**
  * Copies the canonical agent script into a generated assets directory.
  *
+ * The script comes from `../agent/grom-agent.js` — the `agent` directory that
+ * sits beside this module in the repository and, in a host that vendors the
+ * engine, beside the vendored copy of it (D112). A host that omits that
+ * directory fails here with the missing path named, which is the earliest
+ * honest moment to notice.
+ *
  * It is registered through `variant.sources.assets.addGeneratedSourceDirectory`
  * rather than wired by task name, so every consumer (merge assets, packaging
  * and lint's model writer) gets a declared dependency automatically. Pattern
@@ -104,8 +110,15 @@ abstract class SyncAgentRuntime : DefaultTask() {
     }
 }
 
+// The path is relative to *this module*, not to the root of whatever build
+// happens to include it (D112). `rootProject` is Grom's root only when Grom is
+// the root project: a host that vendors the engine under `third_party/grom/`
+// got "file '<host>/agent/grom-agent.js' ... doesn't exist" while the script
+// was in fact sitting next to the engine module. The layout this relies on is
+// documented in docs/TWO-IN-ONE.md §3.1 — the `engine`, `sdk` and `agent`
+// directories are vendored side by side, and nothing else of Grom is required.
 val syncAgentRuntime = tasks.register<SyncAgentRuntime>("syncAgentRuntime") {
-    sourceFile.set(rootProject.layout.projectDirectory.file("agent/grom-agent.js"))
+    sourceFile.set(layout.projectDirectory.file("../agent/grom-agent.js"))
     outputDirectory.set(layout.buildDirectory.dir("generated/agent-assets"))
 }
 
