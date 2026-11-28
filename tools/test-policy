@@ -518,6 +518,28 @@ check "the forwarded channel may only reach the endpoint we asked for" \
 check "an auth failure names the methods the server offered, and empty is not a verdict" \
   bash -c "grep -q 'class SshAuthMethods' $MAIN/ssh/SshAuthMethods.kt && grep -q 'fun sanitize' $MAIN/ssh/SshAuthMethods.kt && grep -q 'MAX_METHODS' $MAIN/ssh/SshAuthMethods.kt && grep -q 'fun acceptsPassword' $MAIN/ssh/SshAuthMethods.kt && grep -q 'SSH_AUTH_METHOD_NOT_ALLOWED' $MAIN/ssh/SshTunnelManager.kt && grep -q 'if (offered.isNotEmpty())' $MAIN/ssh/SshTunnelManager.kt && grep -q '\"authMethods\"' $MAIN/ServerRuntime.kt && grep -q 'ssh_err_auth_methods' app/src/main/java/app/grom/server/GromActivity.kt"
 
+# 83. The embedding guide is executed, from a root that is not Grom's (D112).
+#     Until v0.21.0 nothing built a host: engine/build.gradle.kts resolved the
+#     agent script from `rootProject` (true only while Grom *is* the root) and the
+#     sshd duplicate META-INF files were left for the consumer to pick. Both
+#     failed in any real host, and no gate could see it, because :app builds from
+#     Grom's own root and the C-008 apps depend only on :sdk.
+check "the engine finds the agent beside itself, and the guide is built elsewhere" \
+  bash -c "grep -q 'layout.projectDirectory.file(\"../agent/grom-agent.js\")' engine/build.gradle.kts && ! grep -qE 'sourceFile.set\(rootProject' engine/build.gradle.kts && grep -q 'check-embed' tools/run-gates && test -x tools/check-embed && grep -q 'third_party/grom' tools/check-embed && grep -q 'META-INF/DEPENDENCIES' tools/check-embed"
+
+# 84. A host has a compiled caller, not only a document (D112). The example
+#     depends on :engine exactly the way a host does and is built and tested by
+#     the gate and by CI, so the documented API cannot drift in silence.
+check "the embedded example is a real module in the gate and in ci" \
+  bash -c "grep -q 'include(\":examples:embedded\")' settings.gradle.kts && grep -q 'implementation(project(\":engine\"))' examples/embedded/build.gradle.kts && grep -q 'GromEmbed.start' examples/embedded/src/main/java/app/grom/examples/embedded/EmbedExample.kt && grep -q ':examples:embedded:testDebugUnitTest' tools/run-gates && grep -q 'examples/embedded/build/test-results' tools/check-test-reports && grep -q 'examples:embedded:testDebugUnitTest' .github/workflows/ci.yml && grep -q 'pickFirsts' docs/TWO-IN-ONE.md && grep -q 'META-INF/DEPENDENCIES' docs/TWO-IN-ONE.md"
+
+# 85. The engine does not pretend to pick its consumer's duplicate resources
+#     (D112). A packaging block in a library is ignored for the app that packages
+#     — verified against AGP 8.11 — so a block here would be a silent lie and
+#     would invite deleting the host-side contract the guide documents.
+check "the engine does not pretend to fix its consumer's packaging" \
+  bash -c "! grep -qE '^[[:space:]]*packaging \{' engine/build.gradle.kts"
+
 echo
 TOTAL=$((PASS + FAIL))
 if [ "$FAIL" -ne 0 ]; then

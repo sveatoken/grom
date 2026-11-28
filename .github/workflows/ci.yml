@@ -66,12 +66,13 @@ jobs:
             :testapps:samecert:assembleDebug \
             :testapps:foreigncert:assembleDebug
 
-      - name: JVM tests (engine, sdk, the client example and both flavours)
+      - name: JVM tests (engine, sdk, both examples and both flavours)
         run: |
           gradle --no-daemon --stacktrace \
             :engine:testDebugUnitTest \
             :sdk:testDebugUnitTest \
             :examples:connect:testDebugUnitTest \
+            :examples:embedded:testDebugUnitTest \
             :app:testServer29DebugUnitTest \
             :app:testPeripheral26DebugUnitTest
           # Gradle says "BUILD SUCCESSFUL" whether it ran 838 tests or five.
@@ -85,6 +86,12 @@ jobs:
           tools/test-policy
           tools/verify-ipc-signing
           tools/check-flavours
+
+      # The shipping guide, executed: a host rooted outside this repository
+      # builds an APK from the documented build file (D112). It is a separate
+      # step so a failure names the integration, not the server.
+      - name: Embedded host from an unrelated root
+        run: ./tools/check-embed
 
       - name: Fleet view self-test
         run: ./tools/test-fleet
@@ -111,6 +118,7 @@ jobs:
             engine/build/reports/tests/
             sdk/build/reports/tests/
             examples/connect/build/reports/tests/
+            examples/embedded/build/reports/tests/
             app/build/reports/lint-results-*.html
             engine/build/reports/lint-results-*.html
           if-no-files-found: warn

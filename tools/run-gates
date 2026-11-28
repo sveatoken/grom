@@ -55,18 +55,20 @@ step "build (APKs for the signing gate)" gradle_run \
 # narrowing happened.
 jvm_tests() {
   rm -rf engine/build/test-results sdk/build/test-results \
-    examples/connect/build/test-results app/build/test-results
+    examples/connect/build/test-results examples/embedded/build/test-results \
+    app/build/test-results
   gradle_run \
     :engine:testDebugUnitTest \
     :sdk:testDebugUnitTest \
     :examples:connect:testDebugUnitTest \
+    :examples:embedded:testDebugUnitTest \
     :app:testServer29DebugUnitTest \
     :app:testPeripheral26DebugUnitTest \
     --rerun &&
     ./tools/check-test-reports
 }
 
-step "JVM tests (engine, sdk, the client example and both flavours)" jvm_tests
+step "JVM tests (engine, sdk, both examples and both flavours)" jvm_tests
 
 # The check count is not repeated in this label: it was hardcoded, it drifted
 # (it said 73 while test-policy ran 77), and test-policy prints the real number
@@ -75,6 +77,11 @@ step "static policy" ./tools/test-policy
 step "third-party ledger" ./tools/check-third-party
 step "IPC signing (C-008)" ./tools/verify-ipc-signing
 step "flavour contents (D87)" ./tools/check-flavours
+# The guide in docs/TWO-IN-ONE.md, executed: an isolated root that is not
+# Grom's, the three dirs vendored under third_party/grom/, and a host APK built
+# from the documented build file. It costs a full engine compile because the
+# whole point is a *different* root project (D112).
+step "embedded host from an unrelated root (D112)" ./tools/check-embed
 step "agent secrets (stdin, not argv)" ./tools/test-agent
 step "agent runtime protocol (node)" ./tools/test-agent-runtime
 step "download page (static, no third parties)" ./tools/check-site

@@ -1,0 +1,292 @@
+#!/usr/bin/env bash
+# check-embed — the shipping guide builds a real host, in a root that is not Grom's.
+#
+# Why this exists. Until v0.21.0 the guide in docs/TWO-IN-ONE.md had never been
+# executed by anything. Two lines in it were wrong in a way only a *different*
+# root project can reveal:
+#
+#   * engine/build.gradle.kts read the agent script from `rootProject`, which is
+#     Grom only while Grom is the root project. A host that vendored the engine
+#     under `third_party/grom/` failed with
+#       File '<host>/agent/grom-agent.js' specified for property 'sourceFile'
+#       does not exist
+#     while the script was in fact sitting next to the engine module.
+#   * sshd-core and sshd-common both ship META-INF/DEPENDENCIES, LICENSE and
+#     NOTICE. Those are merged by the module that *packages*, so a library
+#     cannot pick them for its consumer: a packaging block in `:engine` is
+#     ignored (verified), and the host must declare the pickFirsts. Without it
+#     `:app:mergeDebugJavaResource` ends the build with "2 files found with path
+#     'META-INF/DEPENDENCIES'".
+#
+# Neither was visible from inside this repository: `:app` builds from Grom's own
+# root, the C-008 test apps depend only on `:sdk`, and `GromEmbed` had no caller
+# outside its own tests. The gate therefore fabricates the real situation — a
+# separate root, the three directories vendored under third_party/grom/, a host
+# module that calls the documented API — and builds its APK.
+#
+# The isolated root deliberately has **no** agent/ directory at its top level.
+# That is precisely the layout the old `rootProject` line could not survive, so
+# a regression fails here instead of in someone else's project.
+#
+# It builds an application (not just a library) on purpose: the duplicate
+# resources are merged when an APK is packaged, which is the step that failed.
+#
+# Exits non-zero if the host does not build or the APK does not carry the agent.
+
+set -u
+cd "$(dirname "$0")/.." || exit 1
+
+GRADLE_BIN="${GRADLE_BIN:-gradle}"
+GRADLE_ARGS="${GRADLE_ARGS:---no-daemon}"
+# The daemon's heap is not a property of the host project: `org.gradle.jvmargs`
+# in a *project* gradle.properties does not size a daemon that other projects
+# share, so the isolation test states it. With the 512m/256m default, compiling
+# this one-module host exhausted metaspace on a small machine — which would look
+# like an embedding failure and is not one. CI runners have the same default.
+JVM_ARGS="${JVM_ARGS:--Xmx1024m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8}"
+KEEP="${KEEP:-0}"
+
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/grom-embed.XXXXXX")"
+cleanup() {
+  if [ "$KEEP" = "1" ]; then
+    echo "  kept  $WORK"
+  else
+    rm -rf "$WORK"
+  fi
+}
+trap cleanup EXIT
+
+FAIL=0
+PASS=0
+
+check() {
+  local name="$1"; shift
+  if "$@" >/dev/null 2>&1; then
+    PASS=$((PASS + 1))
+    echo "  ok   $name"
+  else
+    FAIL=$((FAIL + 1))
+    echo "  FAIL $name" >&2
+  fi
+}
+
+echo "== check-embed =="
+
+VENDOR="$WORK/third_party/grom"
+mkdir -p "$VENDOR"
+
+# The three directories a host vendors, copied without build output. `agent`
+# sits beside `engine` — that is the layout the module-relative path documents.
+for dir in engine sdk; do
+  mkdir -p "$VENDOR/$dir"
+  tar -C "$dir" --exclude=build --exclude=.gradle -cf - . | tar -C "$VENDOR/$dir" -xf -
+done
+mkdir -p "$VENDOR/agent"
+cp agent/grom-agent.js "$VENDOR/agent/grom-agent.js"
+
+# The gate is about the root of the build, so prove the root is not Grom's:
+# no agent/ here, and no settings.gradle.kts inherited from above.
+check "the isolated root is not Grom's root (no agent/ at top level)" \
+  test ! -e "$WORK/agent"
+
+cat > "$WORK/settings.gradle.kts" <<'GRADLE'
+pluginManagement {
+    repositories { google(); mavenCentral(); gradlePluginPortal() }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories { google(); mavenCentral() }
+}
+rootProject.name = "embed-host"
+
+// A host does not need Grom's tree, only these three directories.
+include(":sdk")
+project(":sdk").projectDir = file("third_party/grom/sdk")
+include(":engine")
+project(":engine").projectDir = file("third_party/grom/engine")
+include(":hostapp")
+GRADLE
+
+cat > "$WORK/build.gradle.kts" <<'GRADLE'
+plugins {
+    id("com.android.application") version "8.11.0" apply false
+    id("org.jetbrains.kotlin.android") version "1.9.22" apply false
+}
+GRADLE
+
+# Same shape as a real host: the profile that keeps a small machine building.
+cat > "$WORK/gradle.properties" <<'GRADLE'
+org.gradle.jvmargs=-Xmx1024m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8
+org.gradle.workers.max=2
+org.gradle.parallel=false
+kotlin.compiler.execution.strategy=in-process
+android.useAndroidX=true
+android.nonTransitiveRClass=true
+GRADLE
+
+if [ -n "${ANDROID_HOME:-}" ]; then
+  echo "sdk.dir=$ANDROID_HOME" > "$WORK/local.properties"
+elif [ -n "${ANDROID_SDK_ROOT:-}" ]; then
+  echo "sdk.dir=$ANDROID_SDK_ROOT" > "$WORK/local.properties"
+fi
+
+mkdir -p "$WORK/hostapp/src/main/java/app/grom/embeddemo"
+
+# The host, exactly as docs/TWO-IN-ONE.md §3.1 tells a developer to write it.
+# The pickFirsts block is the host's own packaging decision (see the header):
+# a library cannot make it for the module that packages.
+cat > "$WORK/hostapp/build.gradle.kts" <<'GRADLE'
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+}
+
+android {
+    namespace = "app.grom.embeddemo"
+    compileSdk = 36
+
+    defaultConfig {
+        applicationId = "app.grom.embeddemo"
+        minSdk = 29
+        targetSdk = 36
+        versionCode = 1
+        versionName = "1.0"
+    }
+
+    packaging {
+        resources {
+            // sshd-core and sshd-common both ship these files. One copy each is
+            // packaged; D112 and TWO-IN-ONE §3.1 say why the host declares it.
+            pickFirsts += setOf(
+                "META-INF/DEPENDENCIES",
+                "META-INF/LICENSE*",
+                "META-INF/NOTICE*",
+                "META-INF/INDEX.LIST"
+            )
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    kotlinOptions { jvmTarget = "17" }
+}
+
+dependencies {
+    implementation(project(":engine"))
+}
+GRADLE
+
+cat > "$WORK/hostapp/src/main/AndroidManifest.xml" <<'XML'
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:label="Embed gate host">
+        <activity android:name=".MainActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
+XML
+
+# Every API in the guide, called the way the guide calls it. If the documented
+# surface drifts, this stops compiling — which is the point.
+cat > "$WORK/hostapp/src/main/java/app/grom/embeddemo/MainActivity.kt" <<'KOTLIN'
+package app.grom.embeddemo
+
+import android.app.Activity
+import android.os.Bundle
+import app.grom.server.embed.EmbedAction
+import app.grom.server.embed.EmbedConsent
+import app.grom.server.embed.EmbedHealth
+import app.grom.server.embed.EmbedState
+import app.grom.server.embed.GromEmbed
+
+class MainActivity : Activity() {
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        if (GromEmbed.consentRecord(this) == null) {
+            GromEmbed.recordConsent(this, noticeVersion = "1", granted = true)
+        }
+
+        val result = GromEmbed.start(
+            this,
+            GromEmbed.Options(
+                projectId = "embed-gate",
+                projectTitle = "Embed gate",
+                noticeVersion = "1",
+                controlPort = GromEmbed.AUTO_PORT
+            )
+        ) { registered -> if (registered) Unit }
+
+        if (!result.requested) {
+            when (result.reason) {
+                EmbedConsent.REQUIRED, EmbedConsent.OUTDATED -> Unit
+                "PORT_IN_USE" -> Unit
+                else -> Unit
+            }
+        }
+
+        GromEmbed.health(this) { health: EmbedHealth ->
+            when (health.state) {
+                EmbedState.RUNNING -> Unit
+                EmbedState.STARTING -> Unit
+                EmbedState.ATTENTION -> Unit
+                EmbedState.STOPPED -> Unit
+                EmbedState.UNKNOWN -> Unit
+            }
+            health.advice.forEach { advice ->
+                if (advice.action == EmbedAction.OPEN_BATTERY_SETTINGS) Unit
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        GromEmbed.stop(this)
+        super.onDestroy()
+    }
+}
+KOTLIN
+
+LOG="$WORK/build.log"
+echo "  ..   building an isolated host (log: $LOG)"
+if ( cd "$WORK" && $GRADLE_BIN --console=plain "-Dorg.gradle.jvmargs=$JVM_ARGS" \
+      $GRADLE_ARGS :hostapp:assembleDebug ) >"$LOG" 2>&1; then
+  PASS=$((PASS + 1))
+  echo "  ok   the isolated host builds an APK"
+else
+  FAIL=$((FAIL + 1))
+  echo "  FAIL the isolated host did not build" >&2
+  echo "       (this is what a third-party project sees first)" >&2
+  tail -40 "$LOG" | sed 's/^/       /' >&2
+fi
+
+APK="$WORK/hostapp/build/outputs/apk/debug/hostapp-debug.apk"
+if [ -f "$APK" ]; then
+  # A measurement, not a limit: a bound would drift with AGP and the host's own
+  # code. It is what docs/TWO-IN-ONE.md §4 quotes for "the engine without the
+  # runtime", so it is printed where a reader can check it.
+  echo "  ..   host APK: $(wc -c < "$APK") bytes (engine, sdk and the agent script; no arm64 runtime)"
+  check "the APK carries the agent the engine packaged" \
+    bash -c "unzip -l '$APK' | grep -q 'assets/node/grom-agent.js'"
+  check "the embedded service stays private to the host" \
+    bash -c "grep -q 'app.grom.server.service.GromService' '$WORK/hostapp/build/intermediates/merged_manifest/debug/processDebugMainManifest/AndroidManifest.xml' && grep -q 'android:exported=\"false\"' '$WORK/hostapp/build/intermediates/merged_manifest/debug/processDebugMainManifest/AndroidManifest.xml'"
+  check "the host did not have to ask for an IPC permission" \
+    bash -c "! grep -q 'BIND_GROMSERVER' '$WORK/hostapp/build/intermediates/merged_manifest/debug/processDebugMainManifest/AndroidManifest.xml'"
+else
+  echo "  FAIL no APK at $APK" >&2
+  FAIL=$((FAIL + 1))
+fi
+
+echo
+if [ "$FAIL" -ne 0 ]; then
+  echo "check-embed: FAILED ($PASS passed, $FAIL failed)" >&2
+  exit 1
+fi
+echo "check-embed: OK ($PASS checks)"

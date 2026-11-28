@@ -72,6 +72,7 @@ echo "== check-test-reports =="
 module engine/src/test engine/build/test-results/testDebugUnitTest
 module sdk/src/test sdk/build/test-results/testDebugUnitTest
 module examples/connect/src/test examples/connect/build/test-results/testDebugUnitTest
+module examples/embedded/src/test examples/embedded/build/test-results/testDebugUnitTest
 module app/src/test \
   app/build/test-results/testServer29DebugUnitTest \
   app/build/test-results/testPeripheral26DebugUnitTest
